@@ -1,22 +1,43 @@
-Feature,api
-Message count and Total mailbox message size using status,imap
-Fetch MIME structure BODYSTRUCTURE,imap
-Fetch selected headers,imap
-Search by date range and get the IDs of all matching messages,imap
-Fetch a specific message by sequence number,imap
-Fetch a specific message by uid,imap
-Pipeline for transforming email and extract info,,
-Extract html and text,,
-Extract html as md,,
-Extract attachments,,
-Convert emails from period metadata to parquet csv file,,
-Sync email headers and metadata locally,
-Plan and schedule sync work,,
-Task creation and assignment,
-Status tracking and Progress monitoring,
-Workflow stages,
-Blocked/on-hold status,
-Task completion and closure,
-Status history and audit trail,
-Manage UserDefaults settings for app preferences with support for multiple accounts,
-Manage Keychain for access to imap server with support for multiple accounts,
+feature_id,area,capability,requirement,priority,platform
+account.multiple,Accounts,Multiple accounts,"Keep each account isolated in its own stable subfolder, such as account1 or account3.",must,macOS+iOS
+account.settings,Accounts,Account preferences,"Persist non-secret per-account settings and application preferences using an Apple-platform settings abstraction such as UserDefaults.",must,macOS+iOS
+account.secrets,Accounts,Credential storage,"Store passwords, OAuth tokens, and other account secrets in Keychain; never write secrets to account files, logs, or exports.",must,macOS+iOS
+auth.imap-password,Authentication,IMAP credentials,Support standards-based IMAP authentication for servers that permit username and password credentials.,should,macOS+iOS
+auth.oauth2,Authentication,OAuth 2.0,Support OAuth 2.0 authorization and token refresh for IMAP providers that require it.,must,macOS+iOS
+auth.gmail,Authentication,Gmail,Provide a Gmail account setup flow using Google's supported OAuth scopes and IMAP authentication mechanism.,must,macOS+iOS
+auth.provider-extensibility,Authentication,Provider extensibility,Keep provider-specific authorization separate from the generic IMAP client so additional major providers can be added.,should,macOS+iOS
+imap.status,IMAP,Mailbox status,Read mailbox message count and aggregate size information when exposed by the server.,should,macOS+iOS
+imap.search,IMAP,Message discovery,"Search a mailbox by date range and return stable message UIDs, not sequence numbers, for sync planning.",must,macOS+iOS
+imap.headers,IMAP,Header fetch,"Fetch selected RFC message headers, flags, internal date, size, UID, and provider metadata without downloading message bodies.",must,macOS+iOS
+imap.bodystructure,IMAP,MIME structure,Fetch BODYSTRUCTURE independently of message content so callers can inspect available body parts and attachments.,must,macOS+iOS
+imap.fetch-uid,IMAP,UID fetch,Fetch an individual message or MIME part by mailbox and UID.,must,macOS+iOS
+imap.fetch-sequence,IMAP,Sequence-number fetch,Allow sequence-number fetches for immediate low-level operations but do not use sequence numbers as durable identifiers.,could,macOS+iOS
+sync.initial,Sync,Initial metadata sync,Discover and download headers and metadata without downloading full message bodies.,must,macOS+iOS
+sync.refresh,Sync,Incremental refresh,"Refresh local metadata for new, changed, moved, and expunged messages while minimizing network traffic.",must,macOS+iOS
+sync.cursor,Sync,Durable sync cursor,"Record per-account and per-mailbox checkpoints, including UIDVALIDITY and the highest observed UID or equivalent capability-specific state.",must,macOS+iOS
+sync.reconcile,Sync,Mailbox reconciliation,Invalidate or reconcile local state safely when server identity or UIDVALIDITY changes.,must,macOS+iOS
+sync.interruption,Sync,Interruption recovery,Resume an interrupted sync without silently skipping work or unnecessarily repeating completed downloads.,must,macOS+iOS
+workflow.database,Workflow,Embedded task database,Use GRDB and SQLite to persist sync plans tasks attempts dependencies and progress.,must,macOS+iOS
+workflow.lifecycle,Workflow,Task lifecycle,"Track pending, running, blocked, completed, failed, and cancelled task states.",must,macOS+iOS
+workflow.retry,Workflow,Retry policy,Record retryable failures and schedule bounded retries with backoff while preserving the underlying error.,must,macOS+iOS
+workflow.audit,Workflow,Task audit trail,Retain task attempts status transitions timestamps and diagnostic summaries for troubleshooting.,should,macOS+iOS
+workflow.progress,Workflow,Progress reporting,Expose account mailbox and overall sync progress to library clients and the CLI.,should,macOS+iOS
+storage.account-layout,Storage,Account layout,Place metadata workflow state exports and temporary content beneath the owning account subfolder.,must,macOS+iOS
+storage.parquet,Storage,Parquet metadata,"Store normalized message headers and metadata in Parquet with one logical file per account, mailbox, and calendar month.",must,macOS+iOS
+storage.partition-key,Storage,Monthly partitioning,Assign records to monthly partitions using the message internal date and document the timezone and fallback rule.,must,macOS+iOS
+storage.atomicity,Storage,Atomic publication,Write or replace Parquet partitions atomically so interruption cannot expose a partially written file.,must,macOS+iOS
+storage.schema,Storage,Schema evolution,Version the metadata schema and preserve compatibility or provide an explicit migration path.,must,macOS+iOS
+content.fetch,On-demand content,Message fetch,Download a complete message by account mailbox and UID only when explicitly requested.,must,macOS+iOS
+content.parts,On-demand content,Selective MIME fetch,Download selected text HTML or attachment MIME parts without requiring the complete message when the server supports it.,should,macOS+iOS
+content.transform,On-demand content,Content extraction,Extract text HTML and attachment metadata from downloaded MIME content.,should,macOS+iOS
+content.markdown,On-demand content,HTML to Markdown,Optionally convert an HTML body to Markdown for downstream processing.,could,macOS+iOS
+content.temporary,On-demand content,Temporary retention,Treat downloaded bodies and attachments as disposable cached artifacts that can be removed after use or by a cleanup policy.,must,macOS+iOS
+export.csv,Export,CSV export,Export a selected metadata scope or date range to CSV without requiring full message downloads.,must,macOS+iOS
+export.json,Export,JSON export,Export a selected metadata scope or date range to JSON without requiring full message downloads.,must,macOS+iOS
+library.async,Library API,Swift concurrency,Expose cancellable asynchronous operations compatible with Swift concurrency.,must,macOS+iOS
+library.observability,Library API,Structured events,Expose structured progress warnings and errors without leaking message content or credentials.,should,macOS+iOS
+cli.accounts,CLI,Account commands,Provide commands to configure list inspect and remove account configurations.,must,macOS
+cli.sync,CLI,Sync commands,Provide commands to plan start resume inspect and refresh metadata synchronization.,must,macOS
+cli.fetch,CLI,Fetch commands,Provide commands to fetch selected messages or MIME parts on demand and clean up temporary content.,must,macOS
+cli.export,CLI,Export commands,Provide commands to export metadata to CSV or JSON.,must,macOS
+cli.automation,CLI,Automation contract,"Support deterministic machine-readable output, meaningful exit statuses, and non-interactive operation.",should,macOS
