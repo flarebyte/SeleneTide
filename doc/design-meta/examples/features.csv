@@ -1,0 +1,22 @@
+Feature,api
+Message count and Total mailbox message size using status,imap
+Fetch MIME structure BODYSTRUCTURE,imap
+Fetch selected headers,imap
+Search by date range and get the IDs of all matching messages,imap
+Fetch a specific message by sequence number,imap
+Fetch a specific message by uid,imap
+Pipeline for transforming email and extract info,,
+Extract html and text,,
+Extract html as md,,
+Extract attachments,,
+Convert emails from period metadata to parquet csv file,,
+Sync email headers and metadata locally,
+Plan and schedule sync work,,
+Task creation and assignment,
+Status tracking and Progress monitoring,
+Workflow stages,
+Blocked/on-hold status,
+Task completion and closure,
+Status history and audit trail,
+Manage UserDefaults settings for app preferences with support for multiple accounts,
+Manage Keychain for access to imap server with support for multiple accounts,
