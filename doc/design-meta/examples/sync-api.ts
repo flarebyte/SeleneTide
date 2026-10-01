@@ -81,7 +81,7 @@ export interface SyncProgress {
   removedMetadataRecords: number;
 }
 
-/** Public snapshot backed by the GRDB workflow store. */
+/** Public snapshot backed by the offline SwiftData/Core Data workflow store. */
 export interface SyncRunSnapshot {
   runID: SyncRunID;
   planID: SyncPlanID;
@@ -164,7 +164,7 @@ export interface StartSyncOptions {
  *
  * Planning and execution are separate so the CLI or an app can inspect work
  * before starting it. Plans, runs, tasks, attempts, and checkpoints survive
- * process termination in the embedded workflow database.
+ * process termination in the offline SwiftData/Core Data store.
  */
 export interface SyncClient {
   plan(request: PlanSyncRequest): Promise<SyncPlanSummary>;

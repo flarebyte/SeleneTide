@@ -1,7 +1,8 @@
 feature_id,area,capability,requirement,priority,platform
 account.multiple,Accounts,Multiple accounts,"Keep each account isolated in its own stable subfolder, such as account1 or account3.",must,macOS+iOS
-account.settings,Accounts,Account preferences,"Persist non-secret per-account settings and application preferences using an Apple-platform settings abstraction such as UserDefaults.",must,macOS+iOS
+account.settings,Accounts,Account settings,"Persist non-secret per-account configuration in the offline SwiftData/Core Data model store; UserDefaults is not an account data store.",must,macOS+iOS
 account.secrets,Accounts,Credential storage,"Store passwords, OAuth tokens, and other account secrets in Keychain; never write secrets to account files, logs, or exports.",must,macOS+iOS
+settings.global,Accounts,Global preferences,"Do not introduce UserDefaults until a truly global, non-sensitive, device-local preference is identified; if needed, keep it outside account and workflow state.",should,macOS+iOS
 auth.imap-password,Authentication,IMAP credentials,Support standards-based IMAP authentication for servers that permit username and password credentials.,should,macOS+iOS
 auth.oauth2,Authentication,OAuth 2.0,Support OAuth 2.0 authorization and token refresh for IMAP providers that require it.,must,macOS+iOS
 auth.gmail,Authentication,Gmail,Provide a Gmail account setup flow using Google's supported OAuth scopes and IMAP authentication mechanism.,must,macOS+iOS
@@ -17,7 +18,7 @@ sync.refresh,Sync,Incremental refresh,"Refresh local metadata for new, changed, 
 sync.cursor,Sync,Durable sync cursor,"Record per-account and per-mailbox checkpoints, including UIDVALIDITY and the highest observed UID or equivalent capability-specific state.",must,macOS+iOS
 sync.reconcile,Sync,Mailbox reconciliation,Invalidate or reconcile local state safely when server identity or UIDVALIDITY changes.,must,macOS+iOS
 sync.interruption,Sync,Interruption recovery,Resume an interrupted sync without silently skipping work or unnecessarily repeating completed downloads.,must,macOS+iOS
-workflow.database,Workflow,Embedded task database,Use GRDB and SQLite to persist sync plans tasks attempts dependencies and progress.,must,macOS+iOS
+workflow.database,Workflow,Offline workflow store,Use an offline SwiftData/Core Data persistent store for sync plans tasks attempts dependencies checkpoints and progress.,must,macOS+iOS
 workflow.lifecycle,Workflow,Task lifecycle,"Track pending, running, blocked, completed, failed, and cancelled task states.",must,macOS+iOS
 workflow.retry,Workflow,Retry policy,Record retryable failures and schedule bounded retries with backoff while preserving the underlying error.,must,macOS+iOS
 workflow.audit,Workflow,Task audit trail,Retain task attempts status transitions timestamps and diagnostic summaries for troubleshooting.,should,macOS+iOS

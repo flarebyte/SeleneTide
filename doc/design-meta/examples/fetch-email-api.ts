@@ -153,7 +153,10 @@ export interface CleanupExpiredOptions {
 }
 
 export interface FetchEmailClient {
-  /** Starts a fetch and returns once its durable operation record exists. */
+  /**
+   * Starts a fetch and returns once its durable operation record exists in the
+   * offline SwiftData/Core Data workflow store.
+   */
   start(request: FetchEmailRequest): Promise<FetchSnapshot>;
 
   status(fetchID: FetchID): Promise<FetchSnapshot>;
