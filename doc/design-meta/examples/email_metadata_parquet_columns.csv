@@ -55,11 +55,24 @@ gmail.message_id,gmail_message_id,STRING (UTF8),yes,Provider,Gmail X-GM-MSGID,Gm
 gmail.thread_id,gmail_thread_id,STRING (UTF8),yes,Provider,Gmail X-GM-THRID,Gmail native thread identifier,Store as decimal text for lossless cross-tool compatibility
 gmail.labels,gmail_labels,LIST<STRING (UTF8)>,no,Provider,Gmail X-GM-LABELS,Decoded Gmail labels,Use an empty list for non-Gmail accounts
 derived.sender_domain,sender_domain,STRING (UTF8),yes,Derived,Derived sender domain,Lowercased domain from normalized From or Sender address,Document which address wins when several exist
+derived.recipient_domains,recipient_domains,LIST<STRING (UTF8)>,no,Derived,To + Cc + Bcc,Sorted unique lowercased domains from visible normalized recipient addresses,Use an empty list when no valid recipient domain is available
+derived.sent_hour_local,sent_hour_local,INT32,yes,Derived,ENVELOPE Date,Hour of day from sent_at using the original sender offset,Range 0 through 23; null when Date or its offset is unavailable
+derived.sent_weekday_local,sent_weekday_local,INT32,yes,Derived,ENVELOPE Date,ISO weekday from sent_at using the original sender offset,Range 1 Monday through 7 Sunday
+derived.arrival_hour_utc,arrival_hour_utc,INT32,no,Derived,INTERNALDATE,Hour of day from internal_date normalized to UTC,Range 0 through 23
+derived.arrival_weekday_utc,arrival_weekday_utc,INT32,no,Derived,INTERNALDATE,ISO weekday from internal_date normalized to UTC,Range 1 Monday through 7 Sunday
+derived.direction,message_direction,STRING (UTF8),no,Derived,From + recipients + account identity,Message relationship to the account: inbound outbound self or unknown,Compare normalized addresses with the primary account address and observed Delivered-To aliases
 derived.recipient_count,recipient_count,INT32,no,Derived,Derived recipient count,Count of unique normalized visible To Cc and retained Bcc addresses,Does not include hidden SMTP recipients
+derived.to_recipient_count,to_recipient_count,INT32,no,Derived,To,Count of unique normalized To addresses,Useful for direct-versus-broadcast analysis
+derived.cc_recipient_count,cc_recipient_count,INT32,no,Derived,Cc,Count of unique normalized Cc addresses,Use zero when Cc is absent
 derived.attachment_count,attachment_count,INT32,no,Derived,Derived attachment count,Count of MIME parts classified as attachments,Use a stable documented classification rule
+derived.has_attachments,has_attachments,BOOLEAN,no,Derived,BODYSTRUCTURE,Whether attachment_count is greater than zero,Convenient for grouping and CSV exports
+derived.attachment_size,attachment_encoded_size_bytes,INT64,yes,Derived,BODYSTRUCTURE,Sum of encoded_size_bytes for parts classified as attachments,Use zero when none exist and null when any attachment size is unknown
+derived.body_format,body_format,STRING (UTF8),no,Derived,BODYSTRUCTURE,Primary body shape: plain html alternative mixed or other,Use a versioned deterministic MIME classification rule
+derived.subject_length,subject_length_characters,INT32,yes,Derived,Subject,Unicode character count of the decoded subject,Null when Subject is absent and zero when it is present but empty
 derived.thread_depth,thread_depth,INT32,no,Derived,Derived thread depth,Approximate depth derived from ordered References,Malformed or absent References reduce accuracy
 derived.delivery_delay,delivery_delay_milliseconds,INT64,yes,Derived,Derived delivery delay,internal_date minus sent_at in milliseconds,May be negative because sender clocks can be wrong
 derived.read_status,is_read,BOOLEAN,no,Derived,Derived read status,Whether FLAGS contains Seen,Does not prove that a human read the message
 derived.replied_status,is_replied,BOOLEAN,no,Derived,Derived replied status,Whether FLAGS contains Answered,Provider and client behavior may be imperfect
+derived.flagged_status,is_flagged,BOOLEAN,no,Derived,FLAGS,Whether FLAGS contains Flagged,Useful for measuring user-marked importance
 derived.bulk_signal,bulk_classification,STRING (UTF8),yes,Derived,Derived mailing-list/bulk signal,Documented classification from list and automation headers,Use a versioned deterministic classifier
 derived.bulk_signal_version,bulk_classification_version,INT32,yes,Derived,Local,Version of the bulk-classification rule,Required whenever bulk_classification is populated
