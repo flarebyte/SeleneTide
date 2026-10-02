@@ -3,6 +3,7 @@ account.multiple,Accounts,Multiple accounts,"Keep each account isolated in its o
 account.settings,Accounts,Account settings,"Persist non-secret per-account configuration in the offline SwiftData/Core Data model store; UserDefaults is not an account data store.",must,macOS+iOS
 account.secrets,Accounts,Credential storage,"Store passwords, OAuth tokens, and other account secrets in Keychain; never write secrets to account files, logs, or exports.",must,macOS+iOS
 settings.global,Accounts,Global preferences,"Do not introduce UserDefaults until a truly global, non-sensitive, device-local preference is identified; if needed, keep it outside account and workflow state.",should,macOS+iOS
+auth.keychain-headless,Authentication,Headless Keychain access,"Configure Keychain access groups and item accessibility so an authorized signed macOS CLI, launchd service, or non-interactive SSH session can read credentials without an unexpected GUI prompt; fail deterministically when the Keychain is unavailable or locked.",must,macOS
 auth.imap-password,Authentication,IMAP credentials,Support standards-based IMAP authentication for servers that permit username and password credentials.,should,macOS+iOS
 auth.oauth2,Authentication,OAuth 2.0,Support OAuth 2.0 authorization and token refresh for IMAP providers that require it.,must,macOS+iOS
 auth.gmail,Authentication,Gmail,Provide a Gmail account setup flow using Google's supported OAuth scopes and IMAP authentication mechanism.,must,macOS+iOS
@@ -13,6 +14,7 @@ imap.headers,IMAP,Header fetch,"Fetch selected RFC message headers, flags, inter
 imap.bodystructure,IMAP,MIME structure,Fetch BODYSTRUCTURE independently of message content so callers can inspect available body parts and attachments.,must,macOS+iOS
 imap.fetch-uid,IMAP,UID fetch,Fetch an individual message or MIME part by mailbox and UID.,must,macOS+iOS
 imap.fetch-sequence,IMAP,Sequence-number fetch,Allow sequence-number fetches for immediate low-level operations but do not use sequence numbers as durable identifiers.,could,macOS+iOS
+imap.gmail-identity,IMAP,Gmail cross-label identity,"Keep account mailbox UIDVALIDITY and UID as the fetch identity, and use account plus X-GM-MSGID as a separate correlation key for the same Gmail message exposed under multiple labels.",must,macOS+iOS
 sync.initial,Sync,Initial metadata sync,Discover and download headers and metadata without downloading full message bodies.,must,macOS+iOS
 sync.refresh,Sync,Incremental refresh,"Refresh local metadata for new, changed, moved, and expunged messages while minimizing network traffic.",must,macOS+iOS
 sync.cursor,Sync,Durable sync cursor,"Record per-account and per-mailbox checkpoints, including UIDVALIDITY and the highest observed UID or equivalent capability-specific state.",must,macOS+iOS
@@ -25,9 +27,10 @@ workflow.audit,Workflow,Task audit trail,Retain task attempts status transitions
 workflow.progress,Workflow,Progress reporting,Expose account mailbox and overall sync progress to library clients and the CLI.,should,macOS+iOS
 storage.account-layout,Storage,Account layout,Place metadata workflow state exports and temporary content beneath the owning account subfolder.,must,macOS+iOS
 storage.parquet,Storage,Parquet metadata,"Store normalized message headers and metadata in Parquet with one logical file per account, mailbox, and calendar month.",must,macOS+iOS
-storage.partition-key,Storage,Monthly partitioning,Assign records to monthly partitions using the message internal date and document the timezone and fallback rule.,must,macOS+iOS
+storage.partition-key,Storage,Monthly partitioning,"Choose YYYY-MM after converting the first usable timestamp to UTC: INTERNALDATE first, then only an unambiguous Date header, then metadata_fetched_at; never infer a timezone for an ambiguous Date header.",must,macOS+iOS
 storage.atomicity,Storage,Atomic publication,Write or replace Parquet partitions atomically so interruption cannot expose a partially written file.,must,macOS+iOS
 storage.schema,Storage,Schema evolution,Version the metadata schema and preserve compatibility or provide an explicit migration path.,must,macOS+iOS
+storage.parquet-engine,Storage,Embedded Parquet engine,"Embed a Parquet-capable native engine, expected to be DuckDB, and keep its C++ bridge or other FFI free of unsupported dynamic dependencies; compile and link it in CI for macOS and iOS arm64 device and simulator targets.",must,macOS+iOS
 content.fetch,On-demand content,Message fetch,Download a complete message by account mailbox and UID only when explicitly requested.,must,macOS+iOS
 content.parts,On-demand content,Selective MIME fetch,Download selected text HTML or attachment MIME parts without requiring the complete message when the server supports it.,should,macOS+iOS
 content.transform,On-demand content,Content extraction,Extract text HTML and attachment metadata from downloaded MIME content.,should,macOS+iOS

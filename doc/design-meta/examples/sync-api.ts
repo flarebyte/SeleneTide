@@ -13,12 +13,23 @@ export type SyncRunID = string;
 export type SyncTaskID = string;
 export type ISO8601DateTime = string;
 
-/** Durable IMAP identity. Sequence numbers must never be persisted here. */
+export type ProviderMessageIdentity = {
+  kind: "gmail";
+  /** Decimal representation of Gmail X-GM-MSGID. */
+  messageID: string;
+};
+
+/**
+ * Durable mailbox-location identity. Sequence numbers must never be persisted.
+ * A provider identity correlates locations but never replaces mailboxID,
+ * UIDVALIDITY, and UID when fetching through IMAP.
+ */
 export interface MessageIdentity {
   accountID: AccountID;
   mailboxID: MailboxID;
   uidValidity: number;
   uid: number;
+  providerIdentity?: ProviderMessageIdentity;
 }
 
 export type MailboxSelection =
