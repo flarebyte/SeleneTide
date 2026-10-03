@@ -1,0 +1,49 @@
+rule_id,area,requirement,rationale
+pipeline.scope,Scope,Implement a fixed email-processing pipeline abstraction rather than a general-purpose workflow engine.,Keeps the first version small and aligned with known transformations
+pipeline.definition,Pipeline,Declare the pipeline graph and step definitions in versioned Swift code.,Avoids a dynamic workflow-definition database and makes invalid cycles testable before release
+pipeline.instantiate,Pipeline,Create one EmailProcessingStep row for every step in the selected pipeline version when creating a job.,Makes pending work and overall completion durable and inspectable
+pipeline.dependencies,Dependencies,Each code-defined step lists stable prerequisite step IDs and the pipeline definition must be acyclic.,Provides explicit sequencing without persisting redundant graph definitions
+pipeline.ready,Dependencies,A pending step becomes ready only when every required prerequisite has succeeded skipped validly or reused a valid result.,Prevents consumers from observing missing inputs
+pipeline.parallel,Dependencies,Run independent ready steps concurrently subject to small execution-kind concurrency limits.,Supports parallel work without an external queue
+pipeline.failure_propagation,Dependencies,When a required prerequisite fails permanently mark dependent steps skipped with a dependency-failed reason.,Ensures the job reaches a deterministic terminal state
+pipeline.optional_dependency,Dependencies,A step may depend on an optional predecessor only when its input contract explicitly handles that predecessor producing no output.,Avoids accidental execution with incomplete inputs
+state.job,State,"Use pending, running, succeeded, succeededWithWarnings, failed, and cancelled as job states.",Keeps overall state compact and queryable
+state.step,State,"Use pending, ready, running, retryWaiting, succeeded, failed, skipped, cancelled, and reused as step states.",Separates schedulable retry and terminal outcomes
+state.success,Completion,A job succeeds when every required step is succeeded or reused and no required step failed.,Defines completion independently of optional failures
+state.warning,Completion,A job succeedsWithWarnings when all required steps succeed but one or more optional steps fail permanently.,Allows best-effort transformations without hiding their failures
+state.failure,Completion,A job fails when any required step exhausts its attempts or reports a non-retryable failure.,Provides a clear terminal rule
+result.atomic_commit,Persistence,Commit outputData output metadata timestamps and the succeeded state in one background-context save.,Prevents a successful state from becoming visible without its output
+result.encoding,Persistence,Store small transformation-specific output as versioned canonical JSON or binary Data and enable Core Data external binary storage when appropriate.,Keeps variable outputs flexible without adding a column for every transformation
+result.query_boundary,Persistence,Do not hide accountID emailUID or emailDate inside JSON or Data.,Preserves efficient filtering joining and date-range queries
+result.email_date,Persistence,"Populate emailDate with the same canonical UTC timestamp used for metadata partitioning: INTERNALDATE, then an unambiguous Date header, then metadata_fetched_at.",Keeps date-range queries deterministic when the Date header is missing or ambiguous
+result.large_artifacts,Persistence,Store very large disposable artifacts in managed files and persist only an integrity-checked relative locator when Core Data external binary storage is unsuitable.,Avoids oversized database rows while keeping recovery explicit
+retry.classification,Retries,Retry only failures classified as transient such as connectivity timeouts rate limits or temporary file contention.,Permanent parsing and validation failures should terminate immediately
+retry.policy,Retries,Apply bounded exponential backoff with jitter and persist attemptCount maximumAttempts and nextAttemptAt.,Survives restart and avoids synchronized retry storms
+retry.optional,Retries,Apply the same bounded retry policy to optional steps before allowing succeededWithWarnings.,Prevents optional from meaning silently ignored
+idempotency.local,Idempotency,Local transformations must be deterministic for their declared input fingerprint and step version.,Makes replay safe
+idempotency.external,Idempotency,Network or side-effecting steps must pass their persisted idempotencyKey when the remote system supports it and reconcile ambiguous outcomes before retrying.,Reduces duplicate external effects after a crash
+recovery.lease,Crash recovery,A scheduler actor claims a ready step by setting running leaseOwner leaseExpiresAt and attemptCount in one Core Data transaction.,Prevents concurrent execution in the normal single-process design
+recovery.lease_renewal,Crash recovery,Long-running executors renew their lease before expiry while short transformations use a conservative fixed lease duration.,Prevents healthy network or I/O work from being reclaimed
+recovery.expired,Crash recovery,On startup return running steps with expired leases to ready or retryWaiting according to retry policy.,Makes interrupted work resumable
+recovery.completed,Crash recovery,Never rerun a succeeded or reused step unless its step version input fingerprint or output schema is no longer valid.,Avoids unnecessary repeated work
+recovery.partial_output,Crash recovery,Discard or overwrite unpublished partial output before retry and expose output only after the atomic success save.,Prevents partial data from being mistaken for a valid result
+version.pipeline,Versioning,Increment pipelineVersion when graph membership dependencies requiredness or overall completion semantics change.,Identifies which orchestration contract created a job
+version.step,Versioning,Increment stepVersion when transformation behavior or its output contract changes incompatibly.,Invalidates stale persisted results precisely
+version.output,Versioning,Increment outputSchemaVersion when the serialized output representation changes and provide decoding migration when reuse is allowed.,Separates storage compatibility from implementation changes
+reuse.match,Result reuse,"Reuse only a succeeded result matching account mailbox UIDVALIDITY UID stepID stepVersion inputFingerprint and a supported outputSchemaVersion.",Prevents cross-message or stale-input reuse
+reuse.record,Result reuse,Create the new step row in reused state and link reusedFrom to the prior result rather than silently omitting the step.,Keeps every pipeline execution complete and auditable
+reuse.validation,Result reuse,Verify externally stored output still exists and matches its recorded integrity information before reuse.,Avoids references to missing or corrupted artifacts
+coredata.container,Core Data,Use one NSPersistentContainer configured with the SQLite store and lightweight migration where compatible.,Uses Apple-supported persistence without extra infrastructure
+coredata.contexts,Core Data,Perform scheduler writes in private-queue background contexts and UI or CLI reads in separate contexts.,Avoids blocking callers and respects managed-object queue confinement
+coredata.objects,Core Data,Pass NSManagedObjectID or immutable Sendable values across tasks and never pass NSManagedObject instances between queues.,Prevents Core Data concurrency violations
+coredata.perform,Core Data,Execute every managed-object access through its context perform or performAndWait API.,Makes queue ownership explicit
+coredata.merge,Core Data,Use an explicit merge policy and automatically merge background saves into read contexts.,Keeps observers consistent when parallel steps finish
+coredata.scheduler,Core Data,Use a single in-process scheduler actor to select and claim work while allowing claimed transformations to execute concurrently.,Avoids distributed locking complexity in v1
+index.date,Indexes,Create a composite fetch index beginning with accountID and emailDate plus a standalone emailDate index.,Supports account-scoped and global date-range queries
+index.identity,Indexes,"Create indexes for accountID plus emailUID and for the full mailbox identity accountID mailboxID uidValidity emailUID.",Supports joins and durable IMAP lookup
+index.scheduling,Indexes,"Index step state and nextAttemptAt, and index leaseExpiresAt for startup recovery.",Keeps ready retry and expired-lease scans efficient
+constraint.job,Uniqueness,"Apply one job uniqueness constraint over accountID mailboxID uidValidity emailUID pipelineID pipelineVersion and inputFingerprint.",Makes job creation idempotent
+constraint.step,Uniqueness,Apply one step uniqueness constraint over denormalized jobID and stepID.,Prevents duplicate instantiated steps without relying on relationship constraints
+constraint.idempotency,Uniqueness,Make idempotencyKey unique and derive it deterministically from job identity step ID step version and input fingerprint.,Prevents duplicate claims for the same logical side effect
+maintenance.history,Maintenance,Prune superseded jobs and unreferenced outputs only with an explicit retention policy after preserving the newest valid reusable results.,Bounds storage without breaking reuse links
+maintenance.no_extra_infra,Maintenance,Do not add CloudKit persistent history tracking an external broker or a separate workflow service in v1 unless a concrete requirement appears.,Keeps deployment and recovery behavior local and understandable

@@ -1,0 +1,45 @@
+field_id,entity,field,core_data_type,required,default_value,indexes,uniqueness_group,relationship,description
+processing_job.id,EmailProcessingJob,id,UUID,yes,,job_id,job_id,,Stable job identifier
+processing_job.account_id,EmailProcessingJob,accountID,String,yes,,job_identity;account_email_date,job_identity,,Stable account identifier and first-class query field
+processing_job.mailbox_id,EmailProcessingJob,mailboxID,String,yes,,job_identity,job_identity,,Stable mailbox identifier because an IMAP UID is mailbox-local
+processing_job.uid_validity,EmailProcessingJob,uidValidity,Integer 64,yes,,job_identity,job_identity,,IMAP UIDVALIDITY paired with the UID
+processing_job.email_uid,EmailProcessingJob,emailUID,Integer 64,yes,,job_identity;account_uid,job_identity,,IMAP UID and first-class query field
+processing_job.email_date,EmailProcessingJob,emailDate,Date,yes,,account_email_date;email_date,,,Normalized UTC message date used for efficient date-range queries
+processing_job.pipeline_id,EmailProcessingJob,pipelineID,String,yes,email-processing-v1,job_identity,job_identity,,Stable code-defined pipeline identifier
+processing_job.pipeline_version,EmailProcessingJob,pipelineVersion,Integer 32,yes,1,job_identity,job_identity,,Version of the pipeline graph and completion rules
+processing_job.input_fingerprint,EmailProcessingJob,inputFingerprint,String,yes,,job_identity,job_identity,,Digest of the source inputs relevant to the pipeline
+processing_job.state,EmailProcessingJob,state,String,yes,pending,job_state,,,Raw job-state enum
+processing_job.required_step_count,EmailProcessingJob,requiredStepCount,Integer 32,yes,0,,,,Number of required steps instantiated for this job
+processing_job.completed_required_step_count,EmailProcessingJob,completedRequiredStepCount,Integer 32,yes,0,,,,Required steps in a successful or valid reused state
+processing_job.failed_optional_step_count,EmailProcessingJob,failedOptionalStepCount,Integer 32,yes,0,,,,Optional steps that exhausted retries
+processing_job.created_at,EmailProcessingJob,createdAt,Date,yes,,created_at,,,Creation timestamp
+processing_job.updated_at,EmailProcessingJob,updatedAt,Date,yes,,updated_at,,,Last durable state-change timestamp
+processing_job.started_at,EmailProcessingJob,startedAt,Date,no,,,,,First execution timestamp
+processing_job.completed_at,EmailProcessingJob,completedAt,Date,no,,completed_at,,,Terminal completion timestamp
+processing_job.steps,EmailProcessingJob,steps,To-many EmailProcessingStep,yes,[],,,one-to-many; inverse=job; delete=cascade,Instantiated transformation steps and their persisted outputs
+processing_step.id,EmailProcessingStep,id,UUID,yes,,step_id,step_id,,Stable step-result identifier
+processing_step.job,EmailProcessingStep,job,To-one EmailProcessingJob,yes,,,,many-to-one; inverse=steps,Owning email-processing job
+processing_step.job_id,EmailProcessingStep,jobID,UUID,yes,,step_identity,step_identity,,Denormalized job ID used by the Core Data uniqueness constraint
+processing_step.step_id,EmailProcessingStep,stepID,String,yes,,step_identity;step_state,step_identity,,Stable code-defined transformation identifier
+processing_step.step_version,EmailProcessingStep,stepVersion,Integer 32,yes,1,result_reuse,,,Version of the transformation implementation and output contract
+processing_step.is_required,EmailProcessingStep,isRequired,Boolean,yes,true,,,,Whether final job success requires this step
+processing_step.execution_kind,EmailProcessingStep,executionKind,String,yes,local,,,,Raw execution classification: local cpu io or network
+processing_step.state,EmailProcessingStep,state,String,yes,pending,step_state;retry_due,,,Raw step-state enum
+processing_step.attempt_count,EmailProcessingStep,attemptCount,Integer 32,yes,0,,,,Number of attempts claimed
+processing_step.maximum_attempts,EmailProcessingStep,maximumAttempts,Integer 32,yes,1,,,,Maximum attempts including the first attempt
+processing_step.next_attempt_at,EmailProcessingStep,nextAttemptAt,Date,no,,retry_due,,,Earliest retry time after backoff
+processing_step.lease_owner,EmailProcessingStep,leaseOwner,String,no,,,,,Identifier of the process currently executing the step
+processing_step.lease_expires_at,EmailProcessingStep,leaseExpiresAt,Date,no,,expired_lease,,,Deadline after which a running step may be reclaimed
+processing_step.input_fingerprint,EmailProcessingStep,inputFingerprint,String,yes,,result_reuse,,,Digest of the exact inputs consumed by this step
+processing_step.idempotency_key,EmailProcessingStep,idempotencyKey,String,yes,,idempotency_key,idempotency_key,,Stable key supplied to idempotent external side effects
+processing_step.output_encoding,EmailProcessingStep,outputEncoding,String,no,,,,,Raw enum such as json binary utf8 or none
+processing_step.output_schema_version,EmailProcessingStep,outputSchemaVersion,Integer 32,no,,,,,Version used to decode outputData
+processing_step.output_data,EmailProcessingStep,outputData,Binary Data,no,,,,,Persisted transformation output; enable external binary storage for larger values
+processing_step.reused_from,EmailProcessingStep,reusedFrom,To-one EmailProcessingStep,no,,,,self-reference; delete=nullify,Earlier successful compatible result reused by this step
+processing_step.failure_code,EmailProcessingStep,failureCode,String,no,,failure_code,,,Stable machine-readable failure code
+processing_step.failure_message,EmailProcessingStep,failureMessage,String,no,,,,,Sanitized diagnostic message without credentials or unnecessary message content
+processing_step.failure_is_retryable,EmailProcessingStep,failureIsRetryable,Boolean,yes,false,,,,Whether policy permits another attempt
+processing_step.created_at,EmailProcessingStep,createdAt,Date,yes,,,,,Step creation timestamp
+processing_step.updated_at,EmailProcessingStep,updatedAt,Date,yes,,updated_at,,,Last durable state-change timestamp
+processing_step.started_at,EmailProcessingStep,startedAt,Date,no,,,,,Most recent attempt start timestamp
+processing_step.finished_at,EmailProcessingStep,finishedAt,Date,no,,,,,Successful skipped or final-failure timestamp

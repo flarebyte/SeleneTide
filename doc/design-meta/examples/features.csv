@@ -40,6 +40,10 @@ content.parts,On-demand content,Selective MIME fetch,Download selected text HTML
 content.transform,On-demand content,Content extraction,Extract text HTML and attachment metadata from downloaded MIME content.,should,macOS+iOS
 content.markdown,On-demand content,HTML to Markdown,Optionally convert an HTML body to Markdown for downstream processing.,could,macOS+iOS
 content.temporary,On-demand content,Temporary retention,Treat downloaded bodies and attachments as disposable cached artifacts that can be removed after use or by a cleanup policy.,must,macOS+iOS
+processing.pipeline,Processing,Durable transformation pipeline,Process each email through a versioned code-defined dependency graph and persist every instantiated step state and output in Core Data.,must,macOS+iOS
+processing.resume,Processing,Crash recovery,Resume incomplete email processing after termination without rerunning still-valid completed steps.,must,macOS+iOS
+processing.parallel,Processing,Bounded parallelism,Run independent ready transformations concurrently with bounded limits for local CPU I/O and network work.,must,macOS+iOS
+processing.reuse,Processing,Result reuse,Reuse successful persisted results only when email identity step version input fingerprint and output schema remain compatible.,must,macOS+iOS
 export.csv,Export,CSV export,Export a selected metadata scope or date range to CSV without requiring full message downloads.,must,macOS+iOS
 export.json,Export,JSON export,Export a selected metadata scope or date range to JSON without requiring full message downloads.,must,macOS+iOS
 library.async,Library API,Swift concurrency,Expose cancellable asynchronous operations compatible with Swift concurrency.,must,macOS+iOS
