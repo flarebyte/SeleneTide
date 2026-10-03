@@ -1,0 +1,40 @@
+rule_id,area,requirement,rationale
+exporter.boundary,Architecture,Implement DuckDBExporter as a dedicated actor or service that is separate from all transformers.,Prevents transformation code from owning analytical persistence or transaction policy
+exporter.source_of_truth,Architecture,Keep Core Data as the operational source of truth and treat DuckDB rows as replayable downstream projections.,Makes dual-store recovery deterministic
+exporter.metadata_schema,Architecture,Use the core and extension columns in email_metadata_parquet_columns.csv for the email_metadata_live DuckDB table.,Keeps live analytics aligned with future Parquet files
+exporter.result_schema,Architecture,Store processing results in a separate row-per-transformer table defined by duckdb_processing_export_tables.csv.,Avoids changing the one-row-per-message grain of email metadata
+eligibility.job,Eligibility,Export steps only after their parent job reaches succeeded succeededWithWarnings or failed.,Prevents analysis of results that may still change during ordinary execution
+eligibility.step,Eligibility,"Export terminal step states succeeded, reused, failed, and skipped; exclude pending running retryWaiting blocked and cancelled by default.",Limits exports to stable completed outcomes
+eligibility.version,Eligibility,Create or reset export state to pending whenever a stable step result receives a higher sourceVersion.,Allows explicit corrections while retaining idempotency
+identity.message,Identity,"Use accountID mailboxID UIDVALIDITY and emailUID as the durable IMAP message key; use accountID plus emailUID only when emailUID is explicitly guaranteed account-scoped.",Avoids collisions between mailboxes
+identity.result,Identity,"Use the durable message key plus transformerName and transformerVersion as the processing-result conflict key.",Supports deterministic per-transformer upserts
+batch.configuration,Batching,Make batch size configurable with a conservative default such as 250 results.,Bounds Core Data memory and DuckDB transaction duration
+batch.ordering,Batching,Select eligible export states deterministically by emailDate accountID emailUID transformerName and transformerVersion.,Makes retries and diagnostics reproducible
+batch.claim,Batching,Claim a batch in one Core Data background-context save by setting exporting batchID leaseOwner leaseExpiresAt and incrementing attemptCount.,Prevents duplicate normal scheduling and makes claims recoverable
+batch.snapshot,Batching,Convert claimed managed objects into immutable Sendable row values inside their Core Data context before calling DuckDB.,Prevents managed objects from crossing concurrency boundaries
+transaction.duckdb,Transactions,Execute all parameterized upserts for one batch inside a single DuckDB transaction and roll back the entire batch on any row failure.,Avoids partially committed analytical batches
+transaction.conflict,Transactions,Upsert on the processing-result conflict key and update only when incoming sourceVersion is greater than or equal to the stored sourceVersion.,Makes replay safe and prevents stale overwrites
+transaction.ack,Transactions,After the DuckDB transaction commits mark the matching Core Data export states exported and set exportedVersion exportedAt and duckDBSchemaVersion in one save.,Records the downstream checkpoint only after durable destination success
+recovery.commit_gap,Crash recovery,If DuckDB commits but the Core Data acknowledgement does not then reclaim the expired Core Data batch and replay the same upserts.,Closes the unavoidable two-database commit gap without distributed transactions
+recovery.verify,Crash recovery,Treat a replayed no-op upsert with an equal or newer destination sourceVersion as success and acknowledge it in Core Data.,Allows recovery after the commit gap
+recovery.no_reverse,Crash recovery,Never infer Core Data operational state from DuckDB and never roll Core Data back because DuckDB is unavailable.,Preserves the source-of-truth boundary
+retry.classification,Retries,Retry DuckDB busy I/O interruption and transient filesystem failures with bounded exponential backoff; block schema corruption incompatible schema and invalid rows.,Separates transient availability from operator-required failures
+retry.batch_split,Retries,When a deterministic row error prevents a batch commit isolate the bad row by splitting the batch and record its stable error.,Allows other valid rows to progress without silently dropping data
+write.parameterized,Writing,Use prepared parameterized insert-on-conflict statements for normal batches and never construct SQL by interpolating values.,Provides safe simple writes for v1
+write.appender,Writing,Allow a future DuckDB appender path only after measured batch volume justifies it and preserve identical transaction and conflict semantics.,Avoids premature bulk-ingestion complexity
+payload.columns,Payloads,Persist stable common analytical values as typed DuckDB columns and transformer-specific output as JSON when it is useful for analysis.,Balances queryability and output flexibility
+payload.binary,Payloads,Avoid exporting opaque binary output by default; include output_binary only when configured and analytically justified.,Prevents unnecessary analytical database growth
+concurrency.actor,Concurrency,Use one DuckDBExporter actor per account database and permit at most one writer transaction at a time.,Matches DuckDB write behavior and simplifies ordering
+concurrency.coredata,Concurrency,Use private-queue Core Data contexts and exchange only object IDs or immutable Sendable snapshots.,Preserves Core Data queue confinement
+concurrency.readers,Concurrency,Allow DuckDB analytical readers while coordinating schema migration archive claims and writer transactions through the exporter layer.,Avoids readers observing half-applied maintenance
+archive.live,Archive,Keep successfully projected rows in the live DuckDB tables until they are eligible for monthly Parquet archival.,Preserves recent queryability
+archive.claim,Archive,In one DuckDB transaction copy eligible live rows into the exporting table with an archive batch ID and remove those exact source versions from live.,Creates a durable immutable archive snapshot
+archive.concurrent_update,Archive,If Core Data exports a newer sourceVersion while an older version is in exporting then upsert the newer version into live.,Prevents archival from losing a concurrent correction
+archive.write,Archive,Write and verify Parquet exclusively from one archive batch in the exporting table.,Makes restart behavior independent of changing live rows
+archive.success,Archive,After verified atomic Parquet publication commit the archive manifest and delete the corresponding exporting rows in one DuckDB transaction.,Ensures only successfully archived staging rows are deleted
+archive.failure,Archive,On Parquet failure retain exporting rows and the batch manifest for retry.,Prevents data loss
+archive.deletion_scope,Archive,Never delete newly projected live rows merely because the Core Data to DuckDB export succeeded.,Clarifies that deletion belongs to successful DuckDB to Parquet archival
+schema.version,Schema evolution,Version the DuckDB processing-result schema independently and store the applied version with each Core Data acknowledgement and archive manifest.,Makes migrations and replay compatibility observable
+schema.migration,Schema evolution,Apply ordered transactional DuckDB migrations before claiming export work and stop export when the destination version is unsupported.,Prevents mixed-schema batches
+schema.additive,Schema evolution,Prefer additive nullable analytical columns and keep transformer-specific evolution inside versioned JSON until a field is promoted.,Keeps the analytical schema stable
+schema.parquet,Schema evolution,Keep compatible logical names and types between DuckDB live exporting tables and the eventual Parquet schema.,Allows direct DuckDB to Parquet projection

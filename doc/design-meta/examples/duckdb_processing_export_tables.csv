@@ -1,0 +1,48 @@
+column_id,tables,column_name,duckdb_type,nullable,key_role,source,description
+result.schema_version,live|exporting,schema_version,INTEGER,no,,Exporter,Destination processing-result schema version
+result.account_id,live|exporting,account_id,VARCHAR,no,message_key;result_key,Core Data EmailProcessingJob,Stable account identifier
+result.mailbox_id,live|exporting,mailbox_id,VARCHAR,no,message_key;result_key,Core Data EmailProcessingJob,Stable mailbox identifier required for IMAP UID identity
+result.uid_validity,live|exporting,uid_validity,BIGINT,no,message_key;result_key,Core Data EmailProcessingJob,IMAP UIDVALIDITY
+result.email_uid,live|exporting,email_uid,BIGINT,no,message_key;result_key,Core Data EmailProcessingJob,Mailbox-local IMAP UID
+result.email_date,live|exporting,email_date,TIMESTAMPTZ,no,,Core Data EmailProcessingJob,Canonical UTC email date for filtering and monthly archival
+result.pipeline_id,live|exporting,pipeline_id,VARCHAR,no,,Core Data EmailProcessingJob,Pipeline identifier that produced the result
+result.pipeline_version,live|exporting,pipeline_version,INTEGER,no,,Core Data EmailProcessingJob,Pipeline graph version
+result.job_id,live|exporting,job_id,UUID,no,,Core Data EmailProcessingJob,Operational job identifier for traceability
+result.job_state,live|exporting,job_state,VARCHAR,no,,Core Data EmailProcessingJob,Stable terminal job state
+result.job_completed_at,live|exporting,job_completed_at,TIMESTAMPTZ,no,,Core Data EmailProcessingJob,Job terminal timestamp
+result.step_id,live|exporting,step_id,VARCHAR,no,,Core Data EmailProcessingStep,Pipeline node identifier
+result.transformer_name,live|exporting,transformer_name,VARCHAR,no,result_key,Core Data EmailProcessingStep,Durable transformer name
+result.transformer_version,live|exporting,transformer_version,INTEGER,no,result_key,Core Data EmailProcessingStep,Transformer implementation version
+result.step_state,live|exporting,step_state,VARCHAR,no,,Core Data EmailProcessingStep,Stable terminal step state
+result.official_status,live|exporting,official_status,VARCHAR,yes,,Core Data EmailProcessingStep,Library-defined transformer status
+result.custom_status,live|exporting,custom_status,VARCHAR,yes,,Core Data EmailProcessingStep,Optional transformer-defined analytical status
+result.status_message,live|exporting,status_message,VARCHAR,yes,,Core Data EmailProcessingStep,Optional human-readable transformer message
+result.attempt_count,live|exporting,attempt_count,INTEGER,no,,Core Data EmailProcessingStep,Attempts consumed by the stable result
+result.output_encoding,live|exporting,output_encoding,VARCHAR,yes,,Core Data EmailProcessingStep,Persisted output encoding
+result.output_schema_version,live|exporting,output_schema_version,INTEGER,yes,,Core Data EmailProcessingStep,Transformer-specific output schema version
+result.output_json,live|exporting,output_json,JSON,yes,,Core Data EmailProcessingStep,Transformer-specific JSON payload; core analytical state never belongs here
+result.output_binary,live|exporting,output_binary,BLOB,yes,,Core Data EmailProcessingStep,Non-JSON payload retained only when analytically justified
+result.failure_code,live|exporting,failure_code,VARCHAR,yes,,Core Data EmailProcessingStep,Stable processing failure code
+result.failure_message,live|exporting,failure_message,VARCHAR,yes,,Core Data EmailProcessingStep,Sanitized processing failure summary
+result.input_fingerprint,live|exporting,input_fingerprint,VARCHAR,no,,Core Data EmailProcessingStep,Digest of inputs consumed by the transformer
+result.output_fingerprint,live|exporting,output_fingerprint,VARCHAR,yes,,Exporter,Digest of the exported payload
+result.source_version,live|exporting,source_version,BIGINT,no,conflict_version,Core Data ProcessingResultExportState,Monotonic source revision used by conflict handling
+result.source_updated_at,live|exporting,source_updated_at,TIMESTAMPTZ,no,,Core Data EmailProcessingStep,Last Core Data result update timestamp
+result.exported_from_core_data_at,live|exporting,exported_from_core_data_at,TIMESTAMPTZ,no,,Exporter,Time the DuckDB upsert transaction committed
+result.extensions,live|exporting,extensions,JSON,no,,Exporter,Future transformer-specific analytical values not promoted to columns
+archive.batch_id,exporting,archive_batch_id,UUID,no,archive_batch,Archive coordinator,Stable DuckDB to Parquet archive batch identifier
+archive.partition_month,exporting,archive_partition_month,VARCHAR,no,archive_partition,Archive coordinator,UTC YYYY-MM target partition
+archive.claimed_at,exporting,archive_claimed_at,TIMESTAMPTZ,no,,Archive coordinator,Time the live row was moved into the exporting table
+archive.attempt_count,exporting,archive_attempt_count,INTEGER,no,,Archive coordinator,Parquet archive attempts for this snapshot
+archive.last_error,exporting,archive_last_error,VARCHAR,yes,,Archive coordinator,Sanitized most recent archive failure
+manifest.batch_id,archive_manifest,batch_id,UUID,no,primary_key,Archive coordinator,Stable archive batch identifier
+manifest.account_id,archive_manifest,account_id,VARCHAR,no,partition_key,Archive coordinator,Owning account
+manifest.mailbox_id,archive_manifest,mailbox_id,VARCHAR,no,partition_key,Archive coordinator,Owning mailbox
+manifest.partition_month,archive_manifest,partition_month,VARCHAR,no,partition_key,Archive coordinator,UTC YYYY-MM partition
+manifest.schema_version,archive_manifest,schema_version,INTEGER,no,,Archive coordinator,Parquet schema version
+manifest.state,archive_manifest,state,VARCHAR,no,,Archive coordinator,Archive state: exporting committed or failed
+manifest.row_count,archive_manifest,row_count,BIGINT,no,,Archive coordinator,Verified exported row count
+manifest.parquet_relative_path,archive_manifest,parquet_relative_path,VARCHAR,yes,,Archive coordinator,Published path relative to the account folder
+manifest.parquet_sha256,archive_manifest,parquet_sha256,VARCHAR,yes,,Archive coordinator,Integrity digest of the published Parquet file
+manifest.created_at,archive_manifest,created_at,TIMESTAMPTZ,no,,Archive coordinator,Batch creation timestamp
+manifest.committed_at,archive_manifest,committed_at,TIMESTAMPTZ,yes,,Archive coordinator,Verified publication timestamp

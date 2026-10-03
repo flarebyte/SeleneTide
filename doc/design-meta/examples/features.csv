@@ -45,6 +45,9 @@ processing.resume,Processing,Crash recovery,Resume incomplete email processing a
 processing.parallel,Processing,Bounded parallelism,Run independent ready transformations concurrently with bounded limits for local CPU I/O and network work.,must,macOS+iOS
 processing.reuse,Processing,Result reuse,Reuse successful persisted results only when email identity step version input fingerprint and output schema remain compatible.,must,macOS+iOS
 processing.transformers,Processing,Transformer registry,"Require uniquely named strongly typed Swift transformers, inject the complete registry at library initialization, and persist each exact transformer name for crash recovery.",must,macOS+iOS
+processing.duckdb-export,Processing,DuckDB analytical projection,Export stable terminal processing results from authoritative Core Data into DuckDB using versioned idempotent transactional upserts.,must,macOS+iOS
+processing.export-checkpoint,Processing,Durable export checkpoint,Track each result source version export state attempts lease exported version and exported timestamp in Core Data.,must,macOS+iOS
+processing.export-recovery,Processing,Dual-store recovery,Replay an expired Core Data export claim safely when DuckDB may have committed before Core Data acknowledged it.,must,macOS+iOS
 export.csv,Export,CSV export,Export a selected metadata scope or date range to CSV without requiring full message downloads.,must,macOS+iOS
 export.json,Export,JSON export,Export a selected metadata scope or date range to JSON without requiring full message downloads.,must,macOS+iOS
 library.async,Library API,Swift concurrency,Expose cancellable asynchronous operations compatible with Swift concurrency.,must,macOS+iOS
