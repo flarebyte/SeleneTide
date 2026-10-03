@@ -1,0 +1,50 @@
+catalog_id,item_kind,dataset,name,value_type,allowed_in,sql_mapping,notes
+dataset.email_metadata,dataset,email_metadata,email_metadata,row,from,registered_email_metadata_relation,"Logical union of archived Parquet, live DuckDB, and correction overlays with tombstones removed and newest versions selected"
+dataset.processing_results,dataset,processing_results,processing_result,row,from,registered_processing_results_relation,Logical union of live and archived stable transformer results
+column.account_id,column,email_metadata,account_id,string,select|where|group_by|having|order_by,account_id,Stable account identifier
+column.mailbox_id,column,email_metadata,mailbox_id,string,select|where|group_by|having|order_by,mailbox_id,Stable mailbox identifier
+column.mailbox_name,column,email_metadata,mailbox_name,string,select|where|group_by|order_by,mailbox_name,User-visible mailbox name
+column.uid,column,email_metadata,uid,integer,select|where|order_by,uid,Mailbox-local IMAP UID
+column.uid_validity,column,email_metadata,uid_validity,integer,select|where,uid_validity,IMAP UIDVALIDITY
+column.email_date,virtual_column,email_metadata,email_date,timestamp,select|where|group_by|having|order_by,canonical_email_date,UTC INTERNALDATE then valid Date then metadata_fetched_at
+column.email_year,virtual_column,email_metadata,email_year,integer,select|where|group_by|having|order_by,year_of_canonical_email_date,UTC calendar year
+column.email_month,virtual_column,email_metadata,email_month,string,select|where|group_by|having|order_by,yyyy_mm_of_canonical_email_date,UTC YYYY-MM
+column.sent_at,column,email_metadata,sent_at,timestamp,select|where|order_by,sent_at,Parsed unambiguous sender Date
+column.subject,column,email_metadata,subject,string,select|where|order_by,subject,Decoded message subject
+column.sender_domain,column,email_metadata,sender_domain,string,select|where|group_by|having|order_by,sender_domain,Normalized lowercased sender domain
+column.message_size,column,email_metadata,message_size_bytes,integer,select|where|group_by|having|order_by|stats,message_size_bytes,Encoded RFC message size
+column.attachment_count,column,email_metadata,attachment_count,integer,select|where|group_by|having|order_by|stats,attachment_count,Derived attachment count
+column.attachment_size,column,email_metadata,attachment_encoded_size_bytes,integer,select|where|group_by|having|order_by|stats,attachment_encoded_size_bytes,Total known encoded attachment size
+column.has_attachments,column,email_metadata,has_attachments,boolean,select|where|group_by|having|order_by,has_attachments,Whether the message has attachments
+column.recipient_count,column,email_metadata,recipient_count,integer,select|where|group_by|having|order_by|stats,recipient_count,Unique visible recipient count
+column.message_direction,column,email_metadata,message_direction,string,select|where|group_by|having|order_by,message_direction,inbound outbound self or unknown
+column.body_format,column,email_metadata,body_format,string,select|where|group_by|having|order_by,body_format,plain html alternative mixed or other
+column.is_read,column,email_metadata,is_read,boolean,select|where|group_by|having|order_by,is_read,Derived Seen flag
+column.is_replied,column,email_metadata,is_replied,boolean,select|where|group_by|having|order_by,is_replied,Derived Answered flag
+column.is_flagged,column,email_metadata,is_flagged,boolean,select|where|group_by|having|order_by,is_flagged,Derived Flagged flag
+column.bulk_classification,column,email_metadata,bulk_classification,string,select|where|group_by|having|order_by,bulk_classification,Versioned bulk or mailing-list classification
+column.sent_hour,column,email_metadata,sent_hour_local,integer,select|where|group_by|having|order_by|stats,sent_hour_local,Sender-local hour 0 through 23
+column.sent_weekday,column,email_metadata,sent_weekday_local,integer,select|where|group_by|having|order_by|stats,sent_weekday_local,Sender-local ISO weekday 1 through 7
+column.delivery_delay,column,email_metadata,delivery_delay_milliseconds,integer,select|where|group_by|having|order_by|stats,delivery_delay_milliseconds,Approximate delivery delay
+processing.account_id,column,processing_results,account_id,string,select|where|group_by|having|order_by,account_id,Stable account identifier
+processing.mailbox_id,column,processing_results,mailbox_id,string,select|where|group_by|having|order_by,mailbox_id,Stable mailbox identifier
+processing.uid,column,processing_results,email_uid,integer,select|where|order_by,email_uid,Mailbox-local IMAP UID
+processing.email_date,column,processing_results,email_date,timestamp,select|where|group_by|having|order_by,email_date,Canonical UTC email date
+processing.transformer,column,processing_results,transformer_name,string,select|where|group_by|having|order_by,transformer_name,Durable transformer identifier
+processing.transformer_version,column,processing_results,transformer_version,integer,select|where|group_by|having|order_by,transformer_version,Transformer contract version
+processing.official_status,column,processing_results,official_status,string,select|where|group_by|having|order_by,official_status,Library-defined transformer status
+processing.custom_status,column,processing_results,custom_status,string,select|where|group_by|having|order_by,custom_status,Transformer-defined analytical status
+processing.attempt_count,column,processing_results,attempt_count,integer,select|where|group_by|having|order_by|stats,attempt_count,Attempts consumed by the stable result
+relationship.processing,relationship,email_metadata,processing_results,one_to_many,relationships,fixed_message_key_join,"Named join on account_id, mailbox_id, uid_validity, and UID; may multiply email rows"
+relationship.email,relationship,processing_results,email_metadata,many_to_one,relationships,fixed_message_key_join,Named join back to the logical email dataset
+function.lower,function,*,lower,string,where|having,lower,Exactly one string expression argument
+function.is_null,function,*,is_null,boolean,where|having,is_null,Exactly one expression argument
+function.is_not_null,function,*,is_not_null,boolean,where|having,is_not_null,Exactly one expression argument
+aggregate.count,aggregate,*,count,integer,stats,count,Counts non-null column values; top-level count true uses COUNT(*)
+aggregate.min,aggregate,*,min,same_as_input,stats,min,Numeric timestamp or string where catalog permits
+aggregate.max,aggregate,*,max,same_as_input,stats,max,Numeric timestamp or string where catalog permits
+aggregate.avg,aggregate,*,avg,number,stats,avg,Numeric columns only
+aggregate.stddev,aggregate,*,stddev,number,stats,stddev_samp,Numeric columns only
+aggregate.median,aggregate,*,median,number,stats,median,Numeric columns only
+aggregate.quantile,aggregate,*,quantile,number,stats,quantile_cont,Numeric column plus a bound probability variable between 0 and 1
+aggregate.approx_distinct,aggregate,*,approx_distinct,integer,stats,approx_count_distinct,Any scalar column

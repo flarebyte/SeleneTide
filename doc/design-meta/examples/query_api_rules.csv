@@ -1,0 +1,50 @@
+rule_id,area,requirement,rationale
+request.json,Request,Accept exactly one JSON object and reject duplicate object keys trailing data and non-JSON numbers.,Keeps the outer protocol deterministic
+request.keys,Request,"Allow only from, select, where, group_by, having, order_by, limit, offset, values, relationships, count, and stats.",Rejects accidental or future-unsafe behavior
+request.mode,Request,"Choose exactly one result mode: rows through select or its safe default, count through count=true, or aggregate statistics through stats.",Makes projection semantics unambiguous
+request.default_select,Request,When rows mode omits select use the dataset's small configured default projection rather than SELECT *.,Prevents accidental exposure of large nested or extension columns
+request.identifier,Identifiers,Require every dataset column alias relationship function aggregate and variable name to match [A-Za-z_][A-Za-z0-9_]*.,Provides one predictable lexical form
+request.catalog,Identifiers,Resolve every identifier through query_catalog.csv in the context where it appears.,Prevents arbitrary SQL identifiers
+request.structure,Separation,Treat JSON properties as query structure expression strings as logic catalog names as identifiers and values entries as literal data.,Keeps validation responsibilities distinct
+expression.grammar,Expressions,"Support identifiers, $variables, allow-listed function calls, not, and, or, comparisons, and parentheses only.",Defines a deliberately small language
+expression.precedence,Expressions,"Parse function calls and parentheses first, then comparisons, then not, then and, then or.",Makes expressions deterministic
+expression.comparisons,Expressions,"Support only ==, !=, <, <=, >, >=, and in.",Excludes SQL fragments pattern syntax and implicit operators
+expression.no_literals,Expressions,Reject quoted strings numeric tokens boolean tokens null tokens array syntax and object syntax inside expressions.,Forces all literal data through values
+expression.variable,Expressions,Parse $name as a variable node and require name to satisfy the identifier grammar.,Separates bound data from identifiers
+expression.in,Expressions,Require the right operand of in to be an array-valued variable with at least one value and a configured maximum length.,Avoids expression list literals and unbounded placeholder expansion
+expression.function,Expressions,Allow function calls only when name arity argument types and expression context match the catalogue.,Prevents arbitrary DuckDB function execution
+expression.depth,Expressions,Reject expressions exceeding configured token node nesting or function-call limits.,Bounds parser and compiler resource use
+ast.no_literal,AST,Do not define a literal AST node.,Makes accidental literal interpolation structurally difficult
+ast.span,AST,Retain byte spans on every expression node.,Supports precise safe diagnostics
+validation.variables,Validation,Require every referenced variable to exist in values and reject unused values by default.,Catches misspellings and stale caller data
+validation.types,Validation,Type-check comparisons functions and in arrays against catalog column types before SQL compilation.,Avoids relying on implicit DuckDB casts
+validation.null,Validation,Use is_null(column) and is_not_null(column) for null tests because null literals are prohibited.,Keeps null semantics explicit
+validation.group,Validation,In grouped queries require every non-aggregate output and order field to be a group_by field.,Preserves SQL grouping correctness
+validation.having,Validation,Allow having to reference grouped identifiers and generated or explicit aggregate aliases only.,Prevents row-level columns leaking into aggregate filters
+validation.order,Validation,Allow order_by fields only when they are selected grouped or produced aggregate aliases.,Prevents hidden expensive sort expressions
+validation.relationship,Validation,Accept only named catalog relationships and reject arbitrary join keys predicates and relationship cycles.,Keeps joins reviewed and bounded
+validation.cardinality,Validation,Require explicit acknowledgement in configuration before count or stats traverses a one-to-many relationship.,Avoids accidental aggregate multiplication
+validation.stats,Validation,Validate every requested aggregate against the input column type and catalogue permissions.,Prevents nonsensical or unsupported aggregation
+validation.quantile,Validation,Require quantile probability to be a variable reference bound to one finite number between 0 and 1.,Keeps aggregate literals parameterized
+validation.limit,Validation,Bind limit and offset as non-negative integers enforce configured maxima and apply a default rows limit.,Bounds output and avoids literal SQL interpolation
+validation.values,Validation,Limit value count string length and in-array length and reject nested objects or arrays of arrays.,Bounds memory and keeps bind types simple
+dataset.logical,Datasets,Never accept table names file paths glob patterns URLs or SQL in from.,Prevents access outside fixed datasets
+dataset.email,Datasets,Resolve email_metadata to a registered relation combining live DuckDB archived Parquet and correction overlays with tombstones removed and newest versions selected.,Presents one current logical dataset
+dataset.processing,Datasets,Resolve processing_results to a registered relation combining live and archived terminal transformer results.,Presents one stable transformer-result dataset
+dataset.files,Datasets,Configure and validate Parquet roots internally at library initialization and never take them from a query request.,Prevents path traversal and arbitrary file reads
+compile.identifiers,SQL compilation,Emit only pre-resolved quoted column aliases fixed SQL mappings dataset relations aggregate mappings and relationship templates.,Identifiers cannot be DuckDB parameters but remain safe through the catalogue
+compile.variables,SQL compilation,Emit a positional placeholder for every scalar variable occurrence and append its typed value to bindings.,Never interpolates literal values
+compile.in,SQL compilation,Expand a validated array variable to positional placeholders or a bound DuckDB list operation without embedding its elements.,Keeps in queries parameterized
+compile.limit,SQL compilation,Emit positional placeholders for limit and offset.,Applies the no-literal-interpolation rule consistently
+compile.count,SQL compilation,Compile count=true to COUNT(*) AS count and include group_by dimensions ahead of it.,Makes row count a first-class operation
+compile.stats,SQL compilation,Compile stats through fixed aggregate mappings with deterministic aliases column_function unless an allow-listed explicit alias is supplied.,Makes result columns stable
+compile.quantile,SQL compilation,"Compile quantile to quantile_cont(resolved_column, ?) with the probability supplied as a binding.",Prevents quantile arguments becoming SQL text
+compile.order,SQL compilation,Emit only validated output identifiers and fixed ASC DESC NULLS FIRST LAST keywords.,Prevents arbitrary order expressions
+compile.parentheses,SQL compilation,Parenthesize emitted logical and comparison nodes according to the AST rather than preserving user whitespace.,Makes SQL semantics follow the validated tree
+execute.readonly,Execution,Execute through a read-only analytical connection with statement timeout cancellation and result-row limits.,Reduces operational impact
+execute.parameters,Execution,Pass SQL and bindings separately through the DuckDB bridge and never log raw bound values by default.,Preserves confidentiality
+error.shape,Errors,Return a stable code stage safe message retryable flag and optional JSON Pointer expression name and byte span.,Supports programmatic handling and precise client feedback
+error.syntax,Errors,Use query.syntax for invalid tokens grammar or prohibited literals and do not include generated SQL.,Avoids leaking implementation details
+error.identifier,Errors,Use query.unknown_identifier or query.disallowed_identifier without suggesting arbitrary database names.,Keeps the allow-list boundary clear
+error.binding,Errors,Use query.missing_value query.unused_value query.value_type or query.value_limit for values failures.,Makes literal-data errors distinct from expression errors
+error.execution,Errors,Map interruption and timeout to retryable errors and database corruption schema mismatch or invalid catalog state to non-retryable errors.,Separates transient execution from configuration faults

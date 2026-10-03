@@ -60,3 +60,6 @@ cli.sync,CLI,Sync commands,Provide commands to plan start resume inspect and ref
 cli.fetch,CLI,Fetch commands,Provide commands to fetch selected messages or MIME parts on demand and clean up temporary content.,must,macOS
 cli.export,CLI,Export commands,Provide commands to export metadata to CSV or JSON.,must,macOS
 cli.automation,CLI,Automation contract,"Support deterministic machine-readable output, meaningful exit statuses, and non-interactive operation.",should,macOS
+query.constrained,Query API,Constrained analytics DSL,"Accept JSON query structure and a small literal-free expression language, validate against an allow-list, and compile only parameterized DuckDB SQL.",must,macOS+iOS
+query.logical-datasets,Query API,Logical analytical datasets,Query fixed logical email and processing-result datasets that safely combine DuckDB live data Parquet archives and correction overlays.,must,macOS+iOS
+query.aggregates,Query API,Counts and statistics,"Support first-class count and allow-listed statistics including min max avg stddev median quantile and approximate distinct.",must,macOS+iOS

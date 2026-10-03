@@ -1,0 +1,83 @@
+[
+  {
+    "name": "monthly_count_from_domain_this_year",
+    "request": {
+      "from": "email_metadata",
+      "count": true,
+      "where": "sender_domain == $domain and email_year == $year",
+      "group_by": ["email_month"],
+      "order_by": [{"field": "email_month", "direction": "asc"}],
+      "values": {"domain": "company.com", "year": 2026}
+    }
+  },
+  {
+    "name": "emails_from_domain_in_period",
+    "request": {
+      "from": "email_metadata",
+      "select": ["subject", "email_date", "sender_domain", "mailbox_name"],
+      "where": "sender_domain == $domain and email_date >= $start and email_date < $end",
+      "order_by": [{"field": "email_date", "direction": "desc"}],
+      "limit": 100,
+      "values": {
+        "domain": "company.com",
+        "start": "2026-01-01T00:00:00Z",
+        "end": "2027-01-01T00:00:00Z"
+      }
+    }
+  },
+  {
+    "name": "all_time_emails_from_domain",
+    "request": {
+      "from": "email_metadata",
+      "select": ["subject", "email_date", "sender_domain", "mailbox_name"],
+      "where": "sender_domain == $domain",
+      "order_by": [{"field": "email_date", "direction": "desc"}],
+      "limit": 100,
+      "values": {"domain": "company.com"}
+    }
+  },
+  {
+    "name": "all_sender_domains",
+    "request": {
+      "from": "email_metadata",
+      "count": true,
+      "group_by": ["sender_domain"],
+      "order_by": [{"field": "count", "direction": "desc"}],
+      "limit": 1000,
+      "values": {}
+    }
+  },
+  {
+    "name": "domain_counts_per_year",
+    "request": {
+      "from": "email_metadata",
+      "count": true,
+      "group_by": ["email_year", "sender_domain"],
+      "order_by": [
+        {"field": "email_year", "direction": "asc"},
+        {"field": "count", "direction": "desc"}
+      ],
+      "limit": 10000,
+      "values": {}
+    }
+  },
+  {
+    "name": "message_size_stats_for_domain",
+    "request": {
+      "from": "email_metadata",
+      "stats": {
+        "message_size_bytes": [
+          "count",
+          "min",
+          "max",
+          "avg",
+          "stddev",
+          "median",
+          {"function": "quantile", "probability": "$percentile", "as": "message_size_p95"}
+        ]
+      },
+      "where": "sender_domain == $domain",
+      "values": {"domain": "company.com", "percentile": 0.95}
+    }
+  }
+]
