@@ -44,6 +44,7 @@ processing.pipeline,Processing,Durable transformation pipeline,Process each emai
 processing.resume,Processing,Crash recovery,Resume incomplete email processing after termination without rerunning still-valid completed steps.,must,macOS+iOS
 processing.parallel,Processing,Bounded parallelism,Run independent ready transformations concurrently with bounded limits for local CPU I/O and network work.,must,macOS+iOS
 processing.reuse,Processing,Result reuse,Reuse successful persisted results only when email identity step version input fingerprint and output schema remain compatible.,must,macOS+iOS
+processing.transformers,Processing,Transformer registry,"Require uniquely named strongly typed Swift transformers, inject the complete registry at library initialization, and persist each exact transformer name for crash recovery.",must,macOS+iOS
 export.csv,Export,CSV export,Export a selected metadata scope or date range to CSV without requiring full message downloads.,must,macOS+iOS
 export.json,Export,JSON export,Export a selected metadata scope or date range to JSON without requiring full message downloads.,must,macOS+iOS
 library.async,Library API,Swift concurrency,Expose cancellable asynchronous operations compatible with Swift concurrency.,must,macOS+iOS

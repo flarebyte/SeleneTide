@@ -21,10 +21,14 @@ processing_step.id,EmailProcessingStep,id,UUID,yes,,step_id,step_id,,Stable step
 processing_step.job,EmailProcessingStep,job,To-one EmailProcessingJob,yes,,,,many-to-one; inverse=steps,Owning email-processing job
 processing_step.job_id,EmailProcessingStep,jobID,UUID,yes,,step_identity,step_identity,,Denormalized job ID used by the Core Data uniqueness constraint
 processing_step.step_id,EmailProcessingStep,stepID,String,yes,,step_identity;step_state,step_identity,,Stable code-defined transformation identifier
-processing_step.step_version,EmailProcessingStep,stepVersion,Integer 32,yes,1,result_reuse,,,Version of the transformation implementation and output contract
+processing_step.transformer_name,EmailProcessingStep,transformerName,String,yes,,transformer_name;result_reuse,,,Exact unique registry name used to resolve the transformer after restart
+processing_step.step_version,EmailProcessingStep,stepVersion,Integer 32,yes,1,result_reuse,,,Version declared by the registered transformer implementation
 processing_step.is_required,EmailProcessingStep,isRequired,Boolean,yes,true,,,,Whether final job success requires this step
 processing_step.execution_kind,EmailProcessingStep,executionKind,String,yes,local,,,,Raw execution classification: local cpu io or network
 processing_step.state,EmailProcessingStep,state,String,yes,pending,step_state;retry_due,,,Raw step-state enum
+processing_step.official_status,EmailProcessingStep,officialStatus,String,no,,official_status,,,Library-defined transformer outcome: succeeded retry failed or skipped
+processing_step.custom_status,EmailProcessingStep,customStatus,String,no,,custom_status,,,Optional transformer-defined status for diagnostics and reporting only
+processing_step.status_message,EmailProcessingStep,statusMessage,String,no,,,,,Optional human-readable message returned by the transformer
 processing_step.attempt_count,EmailProcessingStep,attemptCount,Integer 32,yes,0,,,,Number of attempts claimed
 processing_step.maximum_attempts,EmailProcessingStep,maximumAttempts,Integer 32,yes,1,,,,Maximum attempts including the first attempt
 processing_step.next_attempt_at,EmailProcessingStep,nextAttemptAt,Date,no,,retry_due,,,Earliest retry time after backoff

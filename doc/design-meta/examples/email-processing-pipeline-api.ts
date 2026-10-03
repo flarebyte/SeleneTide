@@ -34,6 +34,8 @@ export interface RetryPolicy {
 /** Static, code-defined configuration; this is not stored as dynamic workflow data. */
 export interface ProcessingStepDefinition {
   id: ProcessingStepID;
+  /** Exact durable lookup key in the injected transformer registry. */
+  transformerName: string;
   version: number;
   outputSchemaVersion: number;
   required: boolean;
@@ -51,6 +53,7 @@ export interface EmailPipelineDefinition {
 export type ProcessingJobState =
   | "pending"
   | "running"
+  | "blocked"
   | "succeeded"
   | "succeeded-with-warnings"
   | "failed"
@@ -61,6 +64,7 @@ export type ProcessingStepState =
   | "ready"
   | "running"
   | "retry-waiting"
+  | "blocked"
   | "succeeded"
   | "failed"
   | "skipped"
@@ -85,6 +89,7 @@ export interface ProcessingStepSnapshot {
   stepObjectID: string;
   jobID: ProcessingJobID;
   stepID: ProcessingStepID;
+  transformerName: string;
   stepVersion: number;
   state: ProcessingStepState;
   required: boolean;
@@ -92,6 +97,9 @@ export interface ProcessingStepSnapshot {
   maximumAttempts: number;
   nextAttemptAt?: ISO8601DateTime;
   reusedFromObjectID?: string;
+  officialStatus?: TransformerOfficialStatus;
+  customStatus?: string;
+  statusMessage?: string;
   failureCode?: string;
   failureMessage?: string;
 }
@@ -110,19 +118,17 @@ export interface StepExecutionContext {
   dependencyOutputs: ReadonlyMap<ProcessingStepID, PersistedStepOutput>;
 }
 
-export type StepExecutionResult =
-  | { kind: "succeeded"; output: PersistedStepOutput }
-  | {
-      kind: "failed";
-      code: string;
-      message: string;
-      retryable: boolean;
-    };
+export type TransformerOfficialStatus =
+  | "succeeded"
+  | "retry"
+  | "failed"
+  | "skipped";
 
-/** Executors are registered in Swift code by stable step ID. */
-export interface ProcessingStepExecutor {
-  readonly stepID: ProcessingStepID;
-  execute(context: StepExecutionContext): Promise<StepExecutionResult>;
+export interface TransformerExecutionResult {
+  officialStatus: TransformerOfficialStatus;
+  customStatus?: string;
+  message?: string;
+  output?: PersistedStepOutput;
 }
 
 export type ProcessingEvent =
