@@ -1,78 +1,79 @@
-column_id,column_name,parquet_type,nullable,category,source_information,description,notes
-schema.version,schema_version,INT32,no,Schema,Local,Schema version used to decode and migrate the row,Start at 1 and increment only for incompatible evolution
-identity.account_id,account_id,STRING (UTF8),no,Identity,Local,Stable SwiftData/Core Data account UUID,Part of both the mailbox-location key and provider correlation keys
-identity.mailbox_id,mailbox_id,STRING (UTF8),no,Identity,Local,Stable SwiftData/Core Data mailbox UUID,"The mailbox-location key is account_id, mailbox_id, uid_validity, and uid"
-identity.mailbox_name,mailbox_name,STRING (UTF8),no,Identity,Local,IMAP mailbox name captured when the row is written,Useful when files are inspected without the model store
-identity.uid_validity,uid_validity,INT64,no,Identity,UIDVALIDITY,IMAP UIDVALIDITY for the containing mailbox,Part of the durable message identity
-identity.uid,uid,INT64,no,Identity,UID,Mailbox-local stable IMAP UID,Sequence number is intentionally excluded because it is transient
-partition.month,partition_month,STRING (UTF8),no,Partition,INTERNALDATE + Date + Local,"Calendar partition formatted as YYYY-MM","Convert the first usable value to UTC: internal_date, then an unambiguous sent_at, then metadata_fetched_at; never infer a timezone for an ambiguous Date header"
-capture.fetched_at,metadata_fetched_at,"TIMESTAMP(MICROS, isAdjustedToUTC=true)",no,Capture,Local,When this metadata was most recently fetched from IMAP,Store UTC
-capture.first_seen_at,first_seen_at,"TIMESTAMP(MICROS, isAdjustedToUTC=true)",no,Capture,Local,When the message was first observed by SeleneTide,Store UTC and preserve across refreshes
-capture.updated_at,metadata_updated_at,"TIMESTAMP(MICROS, isAdjustedToUTC=true)",no,Capture,Local,When this Parquet row was most recently changed,Store UTC
-imap.flags,flags,LIST<STRING (UTF8)>,no,IMAP,FLAGS,Normalized system flags and provider or user keywords,Use an empty list rather than null
-imap.internal_date,internal_date,"TIMESTAMP(MICROS, isAdjustedToUTC=true)",yes,IMAP,INTERNALDATE,Server delivery or storage timestamp normalized to UTC,Retain the original offset separately; null only when the server value is unavailable or invalid
-imap.internal_date_offset,internal_date_utc_offset_minutes,INT32,yes,IMAP,INTERNALDATE,Original INTERNALDATE offset from UTC in minutes,Supports display and forensic analysis
-imap.message_size,message_size_bytes,INT64,yes,IMAP,RFC822.SIZE,Approximate encoded RFC message size in bytes,May include headers body and encoded attachments
-envelope.sent_at,sent_at,"TIMESTAMP(MICROS, isAdjustedToUTC=true)",yes,Envelope,ENVELOPE Date,Sender-supplied Date header normalized to UTC,"Null when missing, invalid, or timezone-ambiguous; never assume the device timezone"
-envelope.sent_at_offset,sent_at_utc_offset_minutes,INT32,yes,Envelope,ENVELOPE Date,Original Date-header offset from UTC in minutes,Preserves the sender timezone offset
-envelope.subject,subject,STRING (UTF8),yes,Envelope,Subject,Decoded message subject,Decode RFC 2047 encoded words
-envelope.from,from_addresses,"LIST<STRUCT<name: STRING, address: STRING>>",no,Envelope,From,Normalized author addresses,Use an empty list when malformed or unavailable
-envelope.sender,sender_address,"STRUCT<name: STRING, address: STRING>",yes,Envelope,Sender,Agent that sent the message when distinct from From,Often absent
-envelope.reply_to,reply_to_addresses,"LIST<STRUCT<name: STRING, address: STRING>>",no,Envelope,Reply-To,Normalized reply destination addresses,Use an empty list when absent
-envelope.to,to_addresses,"LIST<STRUCT<name: STRING, address: STRING>>",no,Envelope,To,Normalized primary recipient addresses,Does not expose hidden SMTP envelope recipients
-envelope.cc,cc_addresses,"LIST<STRUCT<name: STRING, address: STRING>>",no,Envelope,Cc,Normalized carbon-copy recipient addresses,Use an empty list when absent
-envelope.bcc,bcc_addresses,"LIST<STRUCT<name: STRING, address: STRING>>",no,Envelope,Bcc,Normalized Bcc addresses retained in the stored message,Usually empty because delivery commonly removes this header
-thread.message_id,message_id,STRING (UTF8),yes,Threading,Message-ID,Canonical bracketed sender-generated message identifier,Not guaranteed present or globally unique
-thread.in_reply_to,in_reply_to_message_ids,LIST<STRING (UTF8)>,no,Threading,In-Reply-To,Referenced parent Message-ID values,Use an empty list for root messages
-thread.references,reference_message_ids,LIST<STRING (UTF8)>,no,Threading,References,Ordered ancestor Message-ID values,Preserve header order
-mime.body_structure_raw,body_structure_raw,STRING (UTF8),yes,MIME,BODYSTRUCTURE,Original server BODYSTRUCTURE representation,Optional diagnostic source for parser evolution
-mime.parts,mime_parts,"LIST<STRUCT<part_id: STRING, parent_part_id: STRING, media_type: STRING, media_subtype: STRING, parameters: MAP<STRING, STRING>, disposition: STRING, filename: STRING, content_id: STRING, content_languages: LIST<STRING>, transfer_encoding: STRING, encoded_size_bytes: INT64, is_multipart: BOOLEAN, is_attachment: BOOLEAN, is_inline: BOOLEAN>>",no,MIME,BODYSTRUCTURE,Normalized MIME tree nodes,Parent identifiers preserve hierarchy; contains attachment metadata without content bytes
-mime.part_count,mime_part_count,INT32,no,MIME,BODYSTRUCTURE,Number of MIME leaf parts,Derived from mime_parts
-mime.top_level_type,top_level_media_type,STRING (UTF8),yes,MIME,Top-level Content-Type,Normalized top-level media type such as multipart/mixed,Exclude parameters from this value
-mime.top_level_parameters,top_level_content_parameters,"MAP<STRING (UTF8), STRING (UTF8)>",no,MIME,Top-level Content-Type,Normalized top-level content-type parameters,May include a boundary value; use an empty map when absent
-mime.content_disposition,content_disposition,STRING (UTF8),yes,MIME,Content-Disposition,Normalized top-level disposition,Part-level dispositions live in mime_parts
-mime.content_languages,content_languages,LIST<STRING (UTF8)>,no,MIME,Content-Language,Normalized BCP 47 language tags,Use an empty list when absent
-routing.return_path,return_path,"STRUCT<name: STRING, address: STRING>",yes,Routing,Return-Path,Recorded envelope-return or bounce address,Semantics depend on the receiving system
-routing.delivered_to,delivered_to_addresses,"LIST<STRUCT<name: STRING, address: STRING>>",no,Routing,Delivered-To,Provider-recorded delivery aliases or mailbox addresses,Provider-dependent and potentially repeated
-routing.received,received_headers,LIST<STRING (UTF8)>,no,Routing,Received,Raw Received headers in message order,Earlier hops are untrusted and may be forged
-routing.received_hops,received_hops,"LIST<STRUCT<from_host: STRING, by_host: STRING, protocol: STRING, message_id: STRING, for_address: STRING, received_at: TIMESTAMP(MICROS, true), raw_value: STRING>>",no,Routing,Received,Best-effort parsed delivery hops in message order,Keep raw_value because Received syntax and trust vary
-auth.results,authentication_results,"LIST<STRUCT<authserv_id: STRING, method: STRING, result: STRING, properties: MAP<STRING, STRING>, raw_value: STRING>>",no,Authentication,Authentication-Results,Parsed email-authentication outcomes plus their raw values,Trust policy must identify the authoritative receiving server
-auth.received_spf,received_spf,"STRUCT<result: STRING, raw_value: STRING>",yes,Authentication,Received-SPF,Parsed SPF result and original field value,Provider-dependent fallback when Authentication-Results is absent
-auth.dkim,dkim_signatures,"LIST<STRUCT<domain: STRING, selector: STRING, algorithm: STRING, identity: STRING, raw_value: STRING>>",no,Authentication,DKIM-Signature,DKIM signing domains selectors algorithms identities and raw values,Signature presence does not prove successful validation
-list.id,list_id,"STRUCT<name: STRING, identifier: STRING>",yes,Mailing list,List-ID,Mailing-list display name and identifier,Strong list signal when present
-list.unsubscribe,list_unsubscribe_uris,LIST<STRING (UTF8)>,no,Mailing list,List-Unsubscribe,Ordered mailto and HTTPS unsubscribe URIs,Use an empty list when absent
-list.unsubscribe_post,list_unsubscribe_one_click,BOOLEAN,no,Mailing list,List-Unsubscribe-Post,Whether RFC-style one-click unsubscribe is declared,False when absent
-list.post,list_post_uris,LIST<STRING (UTF8)>,no,Mailing list,List-Post,URIs used to submit mail to a list,Use an empty list when absent
-automation.auto_submitted,auto_submitted,STRING (UTF8),yes,Automation,Auto-Submitted,Normalized auto-submission token,Examples include no auto-generated and auto-replied
-automation.precedence,precedence,STRING (UTF8),yes,Automation,Precedence,Normalized legacy precedence token,Non-standard and insufficient alone for classification
-client.x_mailer,x_mailer,STRING (UTF8),yes,Client,X-Mailer,Decoded sending-software identifier,Untrusted and often absent
-client.user_agent,user_agent,STRING (UTF8),yes,Client,User-Agent,Decoded composing or sending client identifier,Untrusted and often absent
-priority.importance,importance,STRING (UTF8),yes,Priority,Importance,Normalized importance value,Prefer high normal or low when recognizable
-priority.priority,priority,STRING (UTF8),yes,Priority,Priority,Normalized declared priority value,Different clients use different vocabularies
-priority.x_priority,x_priority,INT32,yes,Priority,X-Priority,Parsed legacy numeric priority,Normally 1 through 5 when parseable
-organization.name,organization,STRING (UTF8),yes,Organization,Organization,Decoded sender-declared organization,Non-standard sparse and untrusted
-gmail.message_id,gmail_message_id,STRING (UTF8),yes,Provider,Gmail X-GM-MSGID,Gmail account-wide message correlation identifier,"Store as decimal text; account_id plus gmail_message_id correlates label copies but does not replace the mailbox-location key"
-gmail.thread_id,gmail_thread_id,STRING (UTF8),yes,Provider,Gmail X-GM-THRID,Gmail native thread identifier,Store as decimal text for lossless cross-tool compatibility
-gmail.labels,gmail_labels,LIST<STRING (UTF8)>,no,Provider,Gmail X-GM-LABELS,Decoded Gmail labels,Use an empty list for non-Gmail accounts
-derived.sender_domain,sender_domain,STRING (UTF8),yes,Derived,Derived sender domain,Lowercased domain from normalized From or Sender address,Document which address wins when several exist
-derived.recipient_domains,recipient_domains,LIST<STRING (UTF8)>,no,Derived,To + Cc + Bcc,Sorted unique lowercased domains from visible normalized recipient addresses,Use an empty list when no valid recipient domain is available
-derived.sent_hour_local,sent_hour_local,INT32,yes,Derived,ENVELOPE Date,Hour of day from sent_at using the original sender offset,Range 0 through 23; null when Date or its offset is unavailable
-derived.sent_weekday_local,sent_weekday_local,INT32,yes,Derived,ENVELOPE Date,ISO weekday from sent_at using the original sender offset,Range 1 Monday through 7 Sunday
-derived.arrival_hour_utc,arrival_hour_utc,INT32,yes,Derived,INTERNALDATE,Hour of day from internal_date normalized to UTC,Range 0 through 23; null when internal_date is unavailable
-derived.arrival_weekday_utc,arrival_weekday_utc,INT32,yes,Derived,INTERNALDATE,ISO weekday from internal_date normalized to UTC,Range 1 Monday through 7 Sunday; null when internal_date is unavailable
-derived.direction,message_direction,STRING (UTF8),no,Derived,From + recipients + account identity,Message relationship to the account: inbound outbound self or unknown,Compare normalized addresses with the primary account address and observed Delivered-To aliases
-derived.recipient_count,recipient_count,INT32,no,Derived,Derived recipient count,Count of unique normalized visible To Cc and retained Bcc addresses,Does not include hidden SMTP recipients
-derived.to_recipient_count,to_recipient_count,INT32,no,Derived,To,Count of unique normalized To addresses,Useful for direct-versus-broadcast analysis
-derived.cc_recipient_count,cc_recipient_count,INT32,no,Derived,Cc,Count of unique normalized Cc addresses,Use zero when Cc is absent
-derived.attachment_count,attachment_count,INT32,no,Derived,Derived attachment count,Count of MIME parts classified as attachments,Use a stable documented classification rule
-derived.has_attachments,has_attachments,BOOLEAN,no,Derived,BODYSTRUCTURE,Whether attachment_count is greater than zero,Convenient for grouping and CSV exports
-derived.attachment_size,attachment_encoded_size_bytes,INT64,yes,Derived,BODYSTRUCTURE,Sum of encoded_size_bytes for parts classified as attachments,Use zero when none exist and null when any attachment size is unknown
-derived.body_format,body_format,STRING (UTF8),no,Derived,BODYSTRUCTURE,Primary body shape: plain html alternative mixed or other,Use a versioned deterministic MIME classification rule
-derived.subject_length,subject_length_characters,INT32,yes,Derived,Subject,Unicode character count of the decoded subject,Null when Subject is absent and zero when it is present but empty
-derived.thread_depth,thread_depth,INT32,no,Derived,Derived thread depth,Approximate depth derived from ordered References,Malformed or absent References reduce accuracy
-derived.delivery_delay,delivery_delay_milliseconds,INT64,yes,Derived,Derived delivery delay,internal_date minus sent_at in milliseconds,May be negative because sender clocks can be wrong
-derived.read_status,is_read,BOOLEAN,no,Derived,Derived read status,Whether FLAGS contains Seen,Does not prove that a human read the message
-derived.replied_status,is_replied,BOOLEAN,no,Derived,Derived replied status,Whether FLAGS contains Answered,Provider and client behavior may be imperfect
-derived.flagged_status,is_flagged,BOOLEAN,no,Derived,FLAGS,Whether FLAGS contains Flagged,Useful for measuring user-marked importance
-derived.bulk_signal,bulk_classification,STRING (UTF8),yes,Derived,Derived mailing-list/bulk signal,Documented classification from list and automation headers,Use a versioned deterministic classifier
-derived.bulk_signal_version,bulk_classification_version,INT32,yes,Derived,Local,Version of the bulk-classification rule,Required whenever bulk_classification is populated
+column_id,column_name,schema_placement,parquet_type,duckdb_type,nullable,category,source_information,description,notes
+schema.version,schema_version,core_column,INT32,INTEGER,no,Schema,Local,Schema version used to decode and migrate the row,Start at 1 and increment only for incompatible evolution
+extensions.values,extensions,core_column,"MAP<STRING (UTF8), STRING (UTF8)>",JSON,no,Schema,Local,Stable envelope for provider-specific customer-specific and evolving metadata,Use an empty object or map when absent; keys are extension_key column_name values and values use canonical JSON encoding
+identity.account_id,account_id,core_column,STRING (UTF8),VARCHAR,no,Identity,Local,Stable SwiftData/Core Data account UUID,Part of both the mailbox-location key and provider correlation keys
+identity.mailbox_id,mailbox_id,core_column,STRING (UTF8),VARCHAR,no,Identity,Local,Stable SwiftData/Core Data mailbox UUID,"The mailbox-location key is account_id, mailbox_id, uid_validity, and uid"
+identity.mailbox_name,mailbox_name,core_column,STRING (UTF8),VARCHAR,no,Identity,Local,IMAP mailbox name captured when the row is written,Useful when files are inspected without the model store
+identity.uid_validity,uid_validity,core_column,INT64,BIGINT,no,Identity,UIDVALIDITY,IMAP UIDVALIDITY for the containing mailbox,Part of the durable message identity
+identity.uid,uid,core_column,INT64,BIGINT,no,Identity,UID,Mailbox-local stable IMAP UID,Sequence number is intentionally excluded because it is transient
+partition.month,partition_month,core_column,STRING (UTF8),VARCHAR,no,Partition,INTERNALDATE + Date + Local,Calendar partition formatted as YYYY-MM,"Convert the first usable value to UTC: internal_date, then an unambiguous sent_at, then metadata_fetched_at; never infer a timezone for an ambiguous Date header"
+capture.fetched_at,metadata_fetched_at,core_column,"TIMESTAMP(MICROS, isAdjustedToUTC=true)",TIMESTAMPTZ,no,Capture,Local,When this metadata was most recently fetched from IMAP,Store UTC
+capture.first_seen_at,first_seen_at,core_column,"TIMESTAMP(MICROS, isAdjustedToUTC=true)",TIMESTAMPTZ,no,Capture,Local,When the message was first observed by SeleneTide,Store UTC and preserve across refreshes
+capture.updated_at,metadata_updated_at,core_column,"TIMESTAMP(MICROS, isAdjustedToUTC=true)",TIMESTAMPTZ,no,Capture,Local,When this Parquet row was most recently changed,Store UTC
+imap.flags,flags,core_column,LIST<STRING (UTF8)>,VARCHAR[],no,IMAP,FLAGS,Normalized system flags and provider or user keywords,Use an empty list rather than null
+imap.internal_date,internal_date,core_column,"TIMESTAMP(MICROS, isAdjustedToUTC=true)",TIMESTAMPTZ,yes,IMAP,INTERNALDATE,Server delivery or storage timestamp normalized to UTC,Retain the original offset separately; null only when the server value is unavailable or invalid
+imap.internal_date_offset,internal_date_utc_offset_minutes,core_column,INT32,INTEGER,yes,IMAP,INTERNALDATE,Original INTERNALDATE offset from UTC in minutes,Supports display and forensic analysis
+imap.message_size,message_size_bytes,core_column,INT64,BIGINT,yes,IMAP,RFC822.SIZE,Approximate encoded RFC message size in bytes,May include headers body and encoded attachments
+envelope.sent_at,sent_at,core_column,"TIMESTAMP(MICROS, isAdjustedToUTC=true)",TIMESTAMPTZ,yes,Envelope,ENVELOPE Date,Sender-supplied Date header normalized to UTC,"Null when missing, invalid, or timezone-ambiguous; never assume the device timezone"
+envelope.sent_at_offset,sent_at_utc_offset_minutes,core_column,INT32,INTEGER,yes,Envelope,ENVELOPE Date,Original Date-header offset from UTC in minutes,Preserves the sender timezone offset
+envelope.subject,subject,core_column,STRING (UTF8),VARCHAR,yes,Envelope,Subject,Decoded message subject,Decode RFC 2047 encoded words
+envelope.from,from_addresses,core_column,"LIST<STRUCT<name: STRING, address: STRING>>","STRUCT(name VARCHAR, address VARCHAR)[]",no,Envelope,From,Normalized author addresses,Use an empty list when malformed or unavailable
+envelope.sender,sender_address,core_column,"STRUCT<name: STRING, address: STRING>","STRUCT(name VARCHAR, address VARCHAR)",yes,Envelope,Sender,Agent that sent the message when distinct from From,Often absent
+envelope.reply_to,reply_to_addresses,core_column,"LIST<STRUCT<name: STRING, address: STRING>>","STRUCT(name VARCHAR, address VARCHAR)[]",no,Envelope,Reply-To,Normalized reply destination addresses,Use an empty list when absent
+envelope.to,to_addresses,core_column,"LIST<STRUCT<name: STRING, address: STRING>>","STRUCT(name VARCHAR, address VARCHAR)[]",no,Envelope,To,Normalized primary recipient addresses,Does not expose hidden SMTP envelope recipients
+envelope.cc,cc_addresses,core_column,"LIST<STRUCT<name: STRING, address: STRING>>","STRUCT(name VARCHAR, address VARCHAR)[]",no,Envelope,Cc,Normalized carbon-copy recipient addresses,Use an empty list when absent
+envelope.bcc,bcc_addresses,core_column,"LIST<STRUCT<name: STRING, address: STRING>>","STRUCT(name VARCHAR, address VARCHAR)[]",no,Envelope,Bcc,Normalized Bcc addresses retained in the stored message,Usually empty because delivery commonly removes this header
+thread.message_id,message_id,core_column,STRING (UTF8),VARCHAR,yes,Threading,Message-ID,Canonical bracketed sender-generated message identifier,Not guaranteed present or globally unique
+thread.in_reply_to,in_reply_to_message_ids,core_column,LIST<STRING (UTF8)>,VARCHAR[],no,Threading,In-Reply-To,Referenced parent Message-ID values,Use an empty list for root messages
+thread.references,reference_message_ids,core_column,LIST<STRING (UTF8)>,VARCHAR[],no,Threading,References,Ordered ancestor Message-ID values,Preserve header order
+mime.body_structure_raw,body_structure_raw,extension_key,STRING (UTF8),VARCHAR,yes,MIME,BODYSTRUCTURE,Original server BODYSTRUCTURE representation,Optional diagnostic source for parser evolution
+mime.parts,mime_parts,core_column,"LIST<STRUCT<part_id: STRING, parent_part_id: STRING, media_type: STRING, media_subtype: STRING, parameters: MAP<STRING, STRING>, disposition: STRING, filename: STRING, content_id: STRING, content_languages: LIST<STRING>, transfer_encoding: STRING, encoded_size_bytes: INT64, is_multipart: BOOLEAN, is_attachment: BOOLEAN, is_inline: BOOLEAN>>","STRUCT(part_id VARCHAR, parent_part_id VARCHAR, media_type VARCHAR, media_subtype VARCHAR, parameters MAP(VARCHAR, VARCHAR), disposition VARCHAR, filename VARCHAR, content_id VARCHAR, content_languages VARCHAR[], transfer_encoding VARCHAR, encoded_size_bytes BIGINT, is_multipart BOOLEAN, is_attachment BOOLEAN, is_inline BOOLEAN)[]",no,MIME,BODYSTRUCTURE,Normalized MIME tree nodes,Parent identifiers preserve hierarchy; contains attachment metadata without content bytes
+mime.part_count,mime_part_count,core_column,INT32,INTEGER,no,MIME,BODYSTRUCTURE,Number of MIME leaf parts,Derived from mime_parts
+mime.top_level_type,top_level_media_type,core_column,STRING (UTF8),VARCHAR,yes,MIME,Top-level Content-Type,Normalized top-level media type such as multipart/mixed,Exclude parameters from this value
+mime.top_level_parameters,top_level_content_parameters,core_column,"MAP<STRING (UTF8), STRING (UTF8)>","MAP(VARCHAR, VARCHAR)",no,MIME,Top-level Content-Type,Normalized top-level content-type parameters,May include a boundary value; use an empty map when absent
+mime.content_disposition,content_disposition,core_column,STRING (UTF8),VARCHAR,yes,MIME,Content-Disposition,Normalized top-level disposition,Part-level dispositions live in mime_parts
+mime.content_languages,content_languages,core_column,LIST<STRING (UTF8)>,VARCHAR[],no,MIME,Content-Language,Normalized BCP 47 language tags,Use an empty list when absent
+routing.return_path,return_path,core_column,"STRUCT<name: STRING, address: STRING>","STRUCT(name VARCHAR, address VARCHAR)",yes,Routing,Return-Path,Recorded envelope-return or bounce address,Semantics depend on the receiving system
+routing.delivered_to,delivered_to_addresses,extension_key,"LIST<STRUCT<name: STRING, address: STRING>>","STRUCT(name VARCHAR, address VARCHAR)[]",no,Routing,Delivered-To,Provider-recorded delivery aliases or mailbox addresses,Provider-dependent and potentially repeated
+routing.received,received_headers,core_column,LIST<STRING (UTF8)>,VARCHAR[],no,Routing,Received,Raw Received headers in message order,Earlier hops are untrusted and may be forged
+routing.received_hops,received_hops,extension_key,"LIST<STRUCT<from_host: STRING, by_host: STRING, protocol: STRING, message_id: STRING, for_address: STRING, received_at: TIMESTAMP(MICROS, true), raw_value: STRING>>","STRUCT(from_host VARCHAR, by_host VARCHAR, protocol VARCHAR, message_id VARCHAR, for_address VARCHAR, received_at TIMESTAMPTZ, raw_value VARCHAR)[]",no,Routing,Received,Best-effort parsed delivery hops in message order,Keep raw_value because Received syntax and trust vary
+auth.results,authentication_results,core_column,"LIST<STRUCT<authserv_id: STRING, method: STRING, result: STRING, properties: MAP<STRING, STRING>, raw_value: STRING>>","STRUCT(authserv_id VARCHAR, method VARCHAR, result VARCHAR, properties MAP(VARCHAR, VARCHAR), raw_value VARCHAR)[]",no,Authentication,Authentication-Results,Parsed email-authentication outcomes plus their raw values,Trust policy must identify the authoritative receiving server
+auth.received_spf,received_spf,extension_key,"STRUCT<result: STRING, raw_value: STRING>","STRUCT(result VARCHAR, raw_value VARCHAR)",yes,Authentication,Received-SPF,Parsed SPF result and original field value,Provider-dependent fallback when Authentication-Results is absent
+auth.dkim,dkim_signatures,core_column,"LIST<STRUCT<domain: STRING, selector: STRING, algorithm: STRING, identity: STRING, raw_value: STRING>>","STRUCT(domain VARCHAR, selector VARCHAR, algorithm VARCHAR, identity VARCHAR, raw_value VARCHAR)[]",no,Authentication,DKIM-Signature,DKIM signing domains selectors algorithms identities and raw values,Signature presence does not prove successful validation
+list.id,list_id,core_column,"STRUCT<name: STRING, identifier: STRING>","STRUCT(name VARCHAR, identifier VARCHAR)",yes,Mailing list,List-ID,Mailing-list display name and identifier,Strong list signal when present
+list.unsubscribe,list_unsubscribe_uris,core_column,LIST<STRING (UTF8)>,VARCHAR[],no,Mailing list,List-Unsubscribe,Ordered mailto and HTTPS unsubscribe URIs,Use an empty list when absent
+list.unsubscribe_post,list_unsubscribe_one_click,core_column,BOOLEAN,BOOLEAN,no,Mailing list,List-Unsubscribe-Post,Whether RFC-style one-click unsubscribe is declared,False when absent
+list.post,list_post_uris,extension_key,LIST<STRING (UTF8)>,VARCHAR[],no,Mailing list,List-Post,URIs used to submit mail to a list,Use an empty list when absent
+automation.auto_submitted,auto_submitted,core_column,STRING (UTF8),VARCHAR,yes,Automation,Auto-Submitted,Normalized auto-submission token,Examples include no auto-generated and auto-replied
+automation.precedence,precedence,extension_key,STRING (UTF8),VARCHAR,yes,Automation,Precedence,Normalized legacy precedence token,Non-standard and insufficient alone for classification
+client.x_mailer,x_mailer,extension_key,STRING (UTF8),VARCHAR,yes,Client,X-Mailer,Decoded sending-software identifier,Untrusted and often absent
+client.user_agent,user_agent,extension_key,STRING (UTF8),VARCHAR,yes,Client,User-Agent,Decoded composing or sending client identifier,Untrusted and often absent
+priority.importance,importance,core_column,STRING (UTF8),VARCHAR,yes,Priority,Importance,Normalized importance value,Prefer high normal or low when recognizable
+priority.priority,priority,extension_key,STRING (UTF8),VARCHAR,yes,Priority,Priority,Normalized declared priority value,Different clients use different vocabularies
+priority.x_priority,x_priority,extension_key,INT32,INTEGER,yes,Priority,X-Priority,Parsed legacy numeric priority,Normally 1 through 5 when parseable
+organization.name,organization,extension_key,STRING (UTF8),VARCHAR,yes,Organization,Organization,Decoded sender-declared organization,Non-standard sparse and untrusted
+gmail.message_id,gmail_message_id,core_column,STRING (UTF8),VARCHAR,yes,Provider,Gmail X-GM-MSGID,Gmail account-wide message correlation identifier,Promoted to core because account_id plus gmail_message_id is an important cross-label join key; it does not replace the mailbox-location key
+gmail.thread_id,gmail_thread_id,extension_key,STRING (UTF8),VARCHAR,yes,Provider,Gmail X-GM-THRID,Gmail native thread identifier,Store as decimal text for lossless cross-tool compatibility
+gmail.labels,gmail_labels,extension_key,LIST<STRING (UTF8)>,VARCHAR[],no,Provider,Gmail X-GM-LABELS,Decoded Gmail labels,Use an empty list for non-Gmail accounts
+derived.sender_domain,sender_domain,core_column,STRING (UTF8),VARCHAR,yes,Derived,Derived sender domain,Lowercased domain from normalized From or Sender address,Document which address wins when several exist
+derived.recipient_domains,recipient_domains,core_column,LIST<STRING (UTF8)>,VARCHAR[],no,Derived,To + Cc + Bcc,Sorted unique lowercased domains from visible normalized recipient addresses,Use an empty list when no valid recipient domain is available
+derived.sent_hour_local,sent_hour_local,core_column,INT32,INTEGER,yes,Derived,ENVELOPE Date,Hour of day from sent_at using the original sender offset,Range 0 through 23; null when Date or its offset is unavailable
+derived.sent_weekday_local,sent_weekday_local,core_column,INT32,INTEGER,yes,Derived,ENVELOPE Date,ISO weekday from sent_at using the original sender offset,Range 1 Monday through 7 Sunday
+derived.arrival_hour_utc,arrival_hour_utc,core_column,INT32,INTEGER,yes,Derived,INTERNALDATE,Hour of day from internal_date normalized to UTC,Range 0 through 23; null when internal_date is unavailable
+derived.arrival_weekday_utc,arrival_weekday_utc,core_column,INT32,INTEGER,yes,Derived,INTERNALDATE,ISO weekday from internal_date normalized to UTC,Range 1 Monday through 7 Sunday; null when internal_date is unavailable
+derived.direction,message_direction,core_column,STRING (UTF8),VARCHAR,no,Derived,From + recipients + account identity,Message relationship to the account: inbound outbound self or unknown,Compare normalized addresses with the primary account address and observed Delivered-To aliases
+derived.recipient_count,recipient_count,core_column,INT32,INTEGER,no,Derived,Derived recipient count,Count of unique normalized visible To Cc and retained Bcc addresses,Does not include hidden SMTP recipients
+derived.to_recipient_count,to_recipient_count,core_column,INT32,INTEGER,no,Derived,To,Count of unique normalized To addresses,Useful for direct-versus-broadcast analysis
+derived.cc_recipient_count,cc_recipient_count,core_column,INT32,INTEGER,no,Derived,Cc,Count of unique normalized Cc addresses,Use zero when Cc is absent
+derived.attachment_count,attachment_count,core_column,INT32,INTEGER,no,Derived,Derived attachment count,Count of MIME parts classified as attachments,Use a stable documented classification rule
+derived.has_attachments,has_attachments,core_column,BOOLEAN,BOOLEAN,no,Derived,BODYSTRUCTURE,Whether attachment_count is greater than zero,Convenient for grouping and CSV exports
+derived.attachment_size,attachment_encoded_size_bytes,core_column,INT64,BIGINT,yes,Derived,BODYSTRUCTURE,Sum of encoded_size_bytes for parts classified as attachments,Use zero when none exist and null when any attachment size is unknown
+derived.body_format,body_format,core_column,STRING (UTF8),VARCHAR,no,Derived,BODYSTRUCTURE,Primary body shape: plain html alternative mixed or other,Use a versioned deterministic MIME classification rule
+derived.subject_length,subject_length_characters,core_column,INT32,INTEGER,yes,Derived,Subject,Unicode character count of the decoded subject,Null when Subject is absent and zero when it is present but empty
+derived.thread_depth,thread_depth,core_column,INT32,INTEGER,no,Derived,Derived thread depth,Approximate depth derived from ordered References,Malformed or absent References reduce accuracy
+derived.delivery_delay,delivery_delay_milliseconds,core_column,INT64,BIGINT,yes,Derived,Derived delivery delay,internal_date minus sent_at in milliseconds,May be negative because sender clocks can be wrong
+derived.read_status,is_read,core_column,BOOLEAN,BOOLEAN,no,Derived,Derived read status,Whether FLAGS contains Seen,Does not prove that a human read the message
+derived.replied_status,is_replied,core_column,BOOLEAN,BOOLEAN,no,Derived,Derived replied status,Whether FLAGS contains Answered,Provider and client behavior may be imperfect
+derived.flagged_status,is_flagged,core_column,BOOLEAN,BOOLEAN,no,Derived,FLAGS,Whether FLAGS contains Flagged,Useful for measuring user-marked importance
+derived.bulk_signal,bulk_classification,core_column,STRING (UTF8),VARCHAR,yes,Derived,Derived mailing-list/bulk signal,Documented classification from list and automation headers,Use a versioned deterministic classifier
+derived.bulk_signal_version,bulk_classification_version,core_column,INT32,INTEGER,yes,Derived,Local,Version of the bulk-classification rule,Required whenever bulk_classification is populated
