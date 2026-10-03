@@ -1,1 +1,1 @@
-../examples/duckdb-exporter.swift
+../examples/storage/duckdb-exporter.swift

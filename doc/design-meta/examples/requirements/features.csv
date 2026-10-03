@@ -1,6 +1,6 @@
 feature_id,area,capability,requirement,priority,platform
-account.multiple,Accounts,Multiple accounts,"Keep each account isolated in its own stable subfolder, such as account1 or account3.",must,macOS+iOS
-account.settings,Accounts,Account settings,"Persist non-secret per-account configuration in the offline SwiftData/Core Data model store; UserDefaults is not an account data store.",must,macOS+iOS
+account.multiple,Accounts,Multiple accounts,"Keep each account's analytical files and temporary artifacts in its own stable subfolder, such as account1 or account3; isolate shared Core Data rows by accountID.",must,macOS+iOS
+account.settings,Accounts,Account settings,Persist non-secret per-account configuration in the application-local Core Data store; UserDefaults is not an account data store.,must,macOS+iOS
 account.secrets,Accounts,Credential storage,"Store passwords, OAuth tokens, and other account secrets in Keychain; never write secrets to account files, logs, or exports.",must,macOS+iOS
 settings.global,Accounts,Global preferences,"Do not introduce UserDefaults until a truly global, non-sensitive, device-local preference is identified; if needed, keep it outside account and workflow state.",should,macOS+iOS
 auth.keychain-headless,Authentication,Headless Keychain access,"Configure Keychain access groups and item accessibility so an authorized signed macOS CLI, launchd service, or non-interactive SSH session can read credentials without an unexpected GUI prompt; fail deterministically when the Keychain is unavailable or locked.",must,macOS
@@ -20,7 +20,7 @@ sync.refresh,Sync,Incremental refresh,"Refresh local metadata for new, changed, 
 sync.cursor,Sync,Durable sync cursor,"Record per-account and per-mailbox checkpoints, including UIDVALIDITY and the highest observed UID or equivalent capability-specific state.",must,macOS+iOS
 sync.reconcile,Sync,Mailbox reconciliation,Invalidate or reconcile local state safely when server identity or UIDVALIDITY changes.,must,macOS+iOS
 sync.interruption,Sync,Interruption recovery,Resume an interrupted sync without silently skipping work or unnecessarily repeating completed downloads.,must,macOS+iOS
-workflow.database,Workflow,Offline workflow store,Use an offline SwiftData/Core Data persistent store for sync plans tasks attempts dependencies checkpoints and progress.,must,macOS+iOS
+workflow.database,Workflow,Offline workflow store,Use one offline Core Data SQLite persistent store for accounts sync plans tasks attempts dependencies checkpoints and progress.,must,macOS+iOS
 workflow.lifecycle,Workflow,Task lifecycle,"Track pending, running, blocked, completed, failed, and cancelled task states.",must,macOS+iOS
 workflow.retry,Workflow,Retry policy,Record retryable failures and schedule bounded retries with backoff while preserving the underlying error.,must,macOS+iOS
 workflow.audit,Workflow,Task audit trail,Retain task attempts status transitions timestamps and diagnostic summaries for troubleshooting.,should,macOS+iOS
@@ -28,12 +28,12 @@ workflow.progress,Workflow,Progress reporting,Expose account mailbox and overall
 workflow.period,Workflow,Period orchestration,"Coordinate UID discovery metadata fetch per-email transformation DuckDB projection and Parquet archival for a UTC period, normally one calendar month.",must,macOS+iOS
 workflow.fanout,Workflow,Durable per-email fan-out,Create idempotent persisted fetch and processing tasks for every discovered mailbox UID and run independent email work with bounded parallelism.,must,macOS+iOS
 workflow.stage-gates,Workflow,Stage completion gates,Start period export only after all required per-email processing is terminal and start Parquet archival only after DuckDB projection is complete and verified.,must,macOS+iOS
-storage.account-layout,Storage,Account layout,Place metadata workflow state exports and temporary content beneath the owning account subfolder.,must,macOS+iOS
+storage.account-layout,Storage,Account layout,Place DuckDB Parquet exports intermediate files and temporary content beneath the owning account subfolder; account and workflow rows live in one shared application-local Core Data store with logical account isolation.,must,macOS+iOS
 storage.parquet,Storage,Parquet metadata,"Store normalized message headers and metadata in Parquet with one logical file per account, mailbox, and calendar month.",must,macOS+iOS
 storage.duckdb-hot,Storage,DuckDB hot store,"Keep recent unarchived headers and metadata in a mutable DuckDB database beneath each account folder, normally covering the open UTC calendar month, so frequent refreshes and queries do not rewrite Parquet.",must,macOS+iOS
-storage.monthly-archive,Storage,Monthly archive,"After a UTC calendar month closes, atomically write and verify each account and mailbox partition as Parquet before deleting the corresponding hot rows from DuckDB.",must,macOS+iOS
+storage.monthly-archive,Storage,Monthly archive,"After a full UTC calendar month closes, transactionally move its live rows into durable queryable exporting snapshots; delete exporting rows only after verified atomic Parquet publication and manifest commit.",must,macOS+iOS
 storage.archive-overlay,Storage,Archived-month corrections,"Record changes and tombstones for already archived messages in a DuckDB overlay, merge that overlay when querying, and compact affected Parquet partitions atomically according to policy.",must,macOS+iOS
-storage.partition-key,Storage,Monthly partitioning,"Choose YYYY-MM after converting the first usable timestamp to UTC: INTERNALDATE first, then only an unambiguous Date header, then metadata_fetched_at; never infer a timezone for an ambiguous Date header.",must,macOS+iOS
+storage.partition-key,Storage,Monthly partitioning,"Choose canonical email_date once per mailbox message identity from UTC INTERNALDATE, then an unambiguous Date header, then the first metadata_fetched_at; retain that timestamp and its YYYY-MM partition across refreshes.",must,macOS+iOS
 storage.atomicity,Storage,Atomic publication,Write or replace Parquet partitions atomically so interruption cannot expose a partially written file.,must,macOS+iOS
 storage.schema,Storage,Schema evolution,"Version the metadata schema, preserve compatibility or provide an explicit migration path, and keep core columns identical between DuckDB and Parquet.",must,macOS+iOS
 storage.schema-placement,Storage,Core and extension fields,"Represent stable shared and frequently queried fields as core columns that always exist, while provider-specific customer-specific and evolving values use a stable extensions envelope: JSON in DuckDB and MAP<STRING, STRING> with canonical JSON values in Parquet.",must,macOS+iOS
@@ -61,5 +61,5 @@ cli.fetch,CLI,Fetch commands,Provide commands to fetch selected messages or MIME
 cli.export,CLI,Export commands,Provide commands to export metadata to CSV or JSON.,must,macOS
 cli.automation,CLI,Automation contract,"Support deterministic machine-readable output, meaningful exit statuses, and non-interactive operation.",should,macOS
 query.constrained,Query API,Constrained analytics DSL,"Accept JSON query structure and a small literal-free expression language, validate against an allow-list, and compile only parameterized DuckDB SQL.",must,macOS+iOS
-query.logical-datasets,Query API,Logical analytical datasets,Query fixed logical email and processing-result datasets that safely combine DuckDB live data Parquet archives and correction overlays.,must,macOS+iOS
-query.aggregates,Query API,Counts and statistics,"Support first-class count and allow-listed statistics including min max avg stddev median quantile and approximate distinct.",must,macOS+iOS
+query.logical-datasets,Query API,Logical analytical datasets,Query fixed logical email and processing-result datasets combining DuckDB live rows queryable exporting snapshots Parquet archives and correction overlays with version deduplication and tombstones.,must,macOS+iOS
+query.aggregates,Query API,Counts and statistics,Support first-class count and allow-listed statistics including min max avg stddev median quantile and approximate distinct.,must,macOS+iOS

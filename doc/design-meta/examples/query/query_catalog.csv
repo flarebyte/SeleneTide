@@ -1,14 +1,14 @@
 catalog_id,item_kind,dataset,name,value_type,allowed_in,sql_mapping,notes
-dataset.email_metadata,dataset,email_metadata,email_metadata,row,from,registered_email_metadata_relation,"Logical union of archived Parquet, live DuckDB, and correction overlays with tombstones removed and newest versions selected"
-dataset.processing_results,dataset,processing_results,processing_result,row,from,registered_processing_results_relation,Logical union of live and archived stable transformer results
+dataset.email_metadata,dataset,email_metadata,email_metadata,row,from,registered_email_metadata_relation,Logical union of live and exporting snapshots archived Parquet and correction overlays; choose newest versions by message key before removing tombstones
+dataset.processing_results,dataset,processing_results,processing_results,row,from,registered_processing_results_relation,Logical union of live and exporting snapshots archived Parquet and processing correction overlays; newest versions selected and tombstones removed
 column.account_id,column,email_metadata,account_id,string,select|where|group_by|having|order_by,account_id,Stable account identifier
 column.mailbox_id,column,email_metadata,mailbox_id,string,select|where|group_by|having|order_by,mailbox_id,Stable mailbox identifier
 column.mailbox_name,column,email_metadata,mailbox_name,string,select|where|group_by|order_by,mailbox_name,User-visible mailbox name
 column.uid,column,email_metadata,uid,integer,select|where|order_by,uid,Mailbox-local IMAP UID
 column.uid_validity,column,email_metadata,uid_validity,integer,select|where,uid_validity,IMAP UIDVALIDITY
-column.email_date,virtual_column,email_metadata,email_date,timestamp,select|where|group_by|having|order_by,canonical_email_date,UTC INTERNALDATE then valid Date then metadata_fetched_at
-column.email_year,virtual_column,email_metadata,email_year,integer,select|where|group_by|having|order_by,year_of_canonical_email_date,UTC calendar year
-column.email_month,virtual_column,email_metadata,email_month,string,select|where|group_by|having|order_by,yyyy_mm_of_canonical_email_date,UTC YYYY-MM
+column.email_date,column,email_metadata,email_date,timestamp,select|where|group_by|having|order_by,email_date,Persisted canonical UTC timestamp chosen once per message identity
+column.email_year,virtual_column,email_metadata,email_year,integer,select|where|group_by|having|order_by,year_of_canonical_email_date,UTC calendar year of persisted email_date
+column.email_month,virtual_column,email_metadata,email_month,string,select|where|group_by|having|order_by,yyyy_mm_of_canonical_email_date,UTC YYYY-MM of persisted email_date
 column.sent_at,column,email_metadata,sent_at,timestamp,select|where|order_by,sent_at,Parsed unambiguous sender Date
 column.subject,column,email_metadata,subject,string,select|where|order_by,subject,Decoded message subject
 column.sender_domain,column,email_metadata,sender_domain,string,select|where|group_by|having|order_by,sender_domain,Normalized lowercased sender domain
@@ -48,3 +48,4 @@ aggregate.stddev,aggregate,*,stddev,number,stats,stddev_samp,Numeric columns onl
 aggregate.median,aggregate,*,median,number,stats,median,Numeric columns only
 aggregate.quantile,aggregate,*,quantile,number,stats,quantile_cont,Numeric column plus a bound probability variable between 0 and 1
 aggregate.approx_distinct,aggregate,*,approx_distinct,integer,stats,approx_count_distinct,Any scalar column
+processing.uid_validity,column,processing_results,uid_validity,integer,select|where,uid_validity,IMAP UIDVALIDITY needed for durable message joins

@@ -11,12 +11,17 @@ processing_job.input_fingerprint,EmailProcessingJob,inputFingerprint,String,yes,
 processing_job.state,EmailProcessingJob,state,String,yes,pending,job_state,,,Raw job-state enum
 processing_job.required_step_count,EmailProcessingJob,requiredStepCount,Integer 32,yes,0,,,,Number of required steps instantiated for this job
 processing_job.completed_required_step_count,EmailProcessingJob,completedRequiredStepCount,Integer 32,yes,0,,,,Required steps in a successful or valid reused state
-processing_job.failed_optional_step_count,EmailProcessingJob,failedOptionalStepCount,Integer 32,yes,0,,,,Optional steps that exhausted retries
+processing_job.failed_optional_step_count,EmailProcessingJob,failedOptionalStepCount,Integer 32,yes,0,,,,"Optional steps that failed permanently, including non-retryable failures"
 processing_job.created_at,EmailProcessingJob,createdAt,Date,yes,,created_at,,,Creation timestamp
 processing_job.updated_at,EmailProcessingJob,updatedAt,Date,yes,,updated_at,,,Last durable state-change timestamp
 processing_job.started_at,EmailProcessingJob,startedAt,Date,no,,,,,First execution timestamp
 processing_job.completed_at,EmailProcessingJob,completedAt,Date,no,,completed_at,,,Terminal completion timestamp
 processing_job.steps,EmailProcessingJob,steps,To-many EmailProcessingStep,yes,[],,,one-to-many; inverse=job; delete=cascade,Instantiated transformation steps and their persisted outputs
+processing_job.source_revision,EmailProcessingJob,sourceRevision,Integer 64,yes,,,,,Globally reserved revision allocated when accepting this job input snapshot before execution
+processing_job.metadata_schema_version,EmailProcessingJob,metadataSchemaVersion,Integer 32,yes,,,,,Schema used to decode the immutable normalized metadata input
+processing_job.metadata_source_version,EmailProcessingJob,metadataSourceVersion,Integer 64,yes,,,,,Globally allocated revision of the consumed metadata snapshot
+processing_job.metadata_relative_path,EmailProcessingJob,metadataRelativePath,String,yes,,,,,Managed immutable metadata file retained while this job or its results can be resumed or reused
+processing_job.metadata_fingerprint,EmailProcessingJob,metadataFingerprint,String,yes,,,,,Digest verified before constructing TransformerInput.metadata
 processing_step.id,EmailProcessingStep,id,UUID,yes,,step_id,step_id,,Stable step-result identifier
 processing_step.job,EmailProcessingStep,job,To-one EmailProcessingJob,yes,,,,many-to-one; inverse=steps,Owning email-processing job
 processing_step.job_id,EmailProcessingStep,jobID,UUID,yes,,step_identity,step_identity,,Denormalized job ID used by the Core Data uniqueness constraint
@@ -39,7 +44,7 @@ processing_step.idempotency_key,EmailProcessingStep,idempotencyKey,String,yes,,i
 processing_step.output_encoding,EmailProcessingStep,outputEncoding,String,no,,,,,Raw enum such as json binary utf8 or none
 processing_step.output_schema_version,EmailProcessingStep,outputSchemaVersion,Integer 32,no,,,,,Version used to decode outputData
 processing_step.output_data,EmailProcessingStep,outputData,Binary Data,no,,,,,Persisted transformation output; enable external binary storage for larger values
-processing_step.reused_from,EmailProcessingStep,reusedFrom,To-one EmailProcessingStep,no,,,,self-reference; delete=nullify,Earlier successful compatible result reused by this step
+processing_step.reused_from,EmailProcessingStep,reusedFrom,To-one EmailProcessingStep,no,,,,self-reference; delete=nullify,Audit link to the original succeeded step; output is copied into the new step so export is self-contained
 processing_step.failure_code,EmailProcessingStep,failureCode,String,no,,failure_code,,,Stable machine-readable failure code
 processing_step.failure_message,EmailProcessingStep,failureMessage,String,no,,,,,Sanitized diagnostic message without credentials or unnecessary message content
 processing_step.failure_is_retryable,EmailProcessingStep,failureIsRetryable,Boolean,yes,false,,,,Whether policy permits another attempt
@@ -48,6 +53,11 @@ processing_step.updated_at,EmailProcessingStep,updatedAt,Date,yes,,updated_at,,,
 processing_step.started_at,EmailProcessingStep,startedAt,Date,no,,,,,Most recent attempt start timestamp
 processing_step.finished_at,EmailProcessingStep,finishedAt,Date,no,,,,,Successful skipped or final-failure timestamp
 processing_step.export_state,EmailProcessingStep,exportState,To-one ProcessingResultExportState,no,,,,one-to-one; inverse=step; delete=cascade,Durable downstream-export checkpoint for this result
+processing_step.account_id,EmailProcessingStep,accountID,String,yes,,step_message;step_account_date;result_reuse,,,Denormalized immutable job field for direct identity date and reuse indexing; maintained in the same save
+processing_step.mailbox_id,EmailProcessingStep,mailboxID,String,yes,,step_message;result_reuse,,,Denormalized immutable job field for direct identity date and reuse indexing; maintained in the same save
+processing_step.uid_validity,EmailProcessingStep,uidValidity,Integer 64,yes,,step_message;result_reuse,,,Denormalized immutable job field for direct identity date and reuse indexing; maintained in the same save
+processing_step.email_uid,EmailProcessingStep,emailUID,Integer 64,yes,,step_message;step_account_uid;result_reuse,,,Denormalized immutable job field for direct identity date and reuse indexing; maintained in the same save
+processing_step.email_date,EmailProcessingStep,emailDate,Date,yes,,step_account_date;step_email_date,,,Denormalized immutable job field for direct identity date and reuse indexing; maintained in the same save
 result_export.id,ProcessingResultExportState,id,UUID,yes,,result_export_id,result_export_id,,Stable export-state identifier
 result_export.step,ProcessingResultExportState,step,To-one EmailProcessingStep,yes,,,,one-to-one; inverse=exportState,Operational result being exported
 result_export.step_object_id,ProcessingResultExportState,stepObjectID,URI,yes,,result_export_step,result_export_step,,Permanent Core Data object URI for idempotent lookup and uniqueness
@@ -58,7 +68,7 @@ result_export.email_uid,ProcessingResultExportState,emailUID,Integer 64,yes,,res
 result_export.email_date,ProcessingResultExportState,emailDate,Date,yes,,result_export_ready,,,Denormalized canonical UTC email date
 result_export.transformer_name,ProcessingResultExportState,transformerName,String,yes,,result_export_identity,,,Persisted transformer lookup and destination-key component
 result_export.transformer_version,ProcessingResultExportState,transformerVersion,Integer 32,yes,,result_export_identity,,,Destination-key component and transformer contract version
-result_export.source_version,ProcessingResultExportState,sourceVersion,Integer 64,yes,1,result_export_ready,,,Monotonic revision of the stable Core Data step result
+result_export.source_version,ProcessingResultExportState,sourceVersion,Integer 64,yes,,result_export_ready,,,Reserved positive globally allocated revision of accepted job inputs or an explicit result correction; never reset across jobs
 result_export.exported_version,ProcessingResultExportState,exportedVersion,Integer 64,no,,,,,Highest sourceVersion acknowledged after a DuckDB commit
 result_export.duckdb_schema_version,ProcessingResultExportState,duckDBSchemaVersion,Integer 32,no,,,,,Destination schema version used for the acknowledged export
 result_export.state,ProcessingResultExportState,state,String,yes,pending,result_export_ready,,,Raw export state: pending exporting retryWaiting exported or blocked
@@ -73,3 +83,32 @@ result_export.last_error_code,ProcessingResultExportState,lastErrorCode,String,n
 result_export.last_error_message,ProcessingResultExportState,lastErrorMessage,String,no,,,,,Sanitized exporter diagnostic
 result_export.created_at,ProcessingResultExportState,createdAt,Date,yes,,,,,Export-state creation timestamp
 result_export.updated_at,ProcessingResultExportState,updatedAt,Date,yes,,result_export_updated,,,Last export-state mutation timestamp
+metadata_export.id,MetadataExportState,id,UUID,yes,,metadata_export_id,metadata_export_id,,Stable metadata-export checkpoint
+metadata_export.task,MetadataExportState,task,To-one SyncTask,yes,,,,one-to-one; inverse=metadataExportState,Metadata fetch task that owns this immutable normalized snapshot
+metadata_export.account_id,MetadataExportState,accountID,String,yes,,metadata_export_ready;metadata_export_identity,,,Owning account UUID encoded as a string
+metadata_export.mailbox_id,MetadataExportState,mailboxID,String,yes,,metadata_export_identity,,,Owning mailbox UUID encoded as a string
+metadata_export.uid_validity,MetadataExportState,uidValidity,Integer 64,yes,,metadata_export_identity,,,Mailbox generation
+metadata_export.uid,MetadataExportState,uid,Integer 64,yes,,metadata_export_identity,,,Mailbox-local IMAP UID
+metadata_export.email_date,MetadataExportState,emailDate,Date,yes,,metadata_export_ready,,,Persisted canonical UTC email date
+metadata_export.source_version,MetadataExportState,sourceVersion,Integer 64,yes,,metadata_export_ready,,,Globally allocated revision reserved when accepting the fetched input snapshot
+metadata_export.result_schema_version,MetadataExportState,resultSchemaVersion,Integer 32,yes,1,,,,Normalized metadata file schema version
+metadata_export.result_relative_path,MetadataExportState,resultRelativePath,String,yes,,,,,Integrity-checked file beneath the account intermediate directory
+metadata_export.result_fingerprint,MetadataExportState,resultFingerprint,String,yes,,,,,Digest of the immutable normalized metadata file
+metadata_export.state,MetadataExportState,state,String,yes,pending,metadata_export_ready,,,pending exporting retryWaiting exported or blocked
+metadata_export.batch_id,MetadataExportState,batchID,UUID,no,,metadata_export_batch,,,Current claim token used to fence acknowledgement and failure saves
+metadata_export.attempt_count,MetadataExportState,attemptCount,Integer 32,yes,0,,,,Claimed export attempts for this revision
+metadata_export.maximum_attempts,MetadataExportState,maximumAttempts,Integer 32,yes,5,,,,Bounded retry ceiling
+metadata_export.next_attempt_at,MetadataExportState,nextAttemptAt,Date,no,,metadata_export_ready,,,Backoff deadline
+metadata_export.lease_owner,MetadataExportState,leaseOwner,String,no,,,,,Owning exporter process session
+metadata_export.lease_expires_at,MetadataExportState,leaseExpiresAt,Date,no,,metadata_export_lease,,,Expired claim may be replayed
+metadata_export.exported_version,MetadataExportState,exportedVersion,Integer 64,no,,,,,Highest acknowledged claimed revision
+metadata_export.duckdb_schema_version,MetadataExportState,duckDBSchemaVersion,Integer 32,no,,,,,Acknowledged email-metadata DuckDB schema version
+metadata_export.exported_at,MetadataExportState,exportedAt,Date,no,,,,,Core Data acknowledgement time following the DuckDB commit
+metadata_export.last_error_code,MetadataExportState,lastErrorCode,String,no,,,,,Stable metadata exporter error
+metadata_export.last_error_message,MetadataExportState,lastErrorMessage,String,no,,,,,Sanitized diagnostic
+metadata_export.created_at,MetadataExportState,createdAt,Date,yes,,,,,Checkpoint creation timestamp
+metadata_export.updated_at,MetadataExportState,updatedAt,Date,yes,,,,,Last durable checkpoint mutation
+metadata_export.first_seen_at,MetadataExportState,firstSeenAt,Date,yes,,,,,Initial metadata observation timestamp retained across refreshes
+metadata_export.email_date_source,MetadataExportState,emailDateSource,String,yes,,,,,Canonical date provenance retained across refreshes: internal_date sent_at or first_metadata_fetched_at
+revision_sequence.name,AnalyticalRevisionSequence,name,String,yes,analytics,revision_sequence,revision_sequence,,Singleton shared Core Data analytical revision allocator
+revision_sequence.next_value,AnalyticalRevisionSequence,nextValue,Integer 64,yes,1,,,,Reserve and increment atomically with accepted inputs or corrections; block on Int64 exhaustion

@@ -34,13 +34,21 @@ public struct TransformerResult<Output: Sendable>: Sendable {
     }
 }
 
-/// Immutable Sendable input assembled from Core Data before execution.
+/// Normalized metadata only; message bodies and attachment bytes are excluded.
+public struct NormalizedEmailMetadata: Sendable {
+    public let schemaVersion: Int32
+    public let sourceVersion: Int64
+    public let canonicalJSON: Data
+}
+
+/// Immutable Sendable input assembled from Core Data and a verified metadata file.
 public struct TransformerInput: Sendable {
     public let accountID: String
     public let mailboxID: String
     public let uidValidity: Int64
     public let emailUID: Int64
     public let emailDate: Date
+    public let metadata: NormalizedEmailMetadata
     public let idempotencyKey: String
     public let dependencyOutputs: [String: PersistedTransformerOutput]
 }
@@ -114,8 +122,11 @@ public struct AnyEmailTransformer: Sendable {
 
 public enum TransformerRegistryError: Error, Equatable {
     case invalidName(String)
+    case invalidVersion(String)
     case duplicateName(String)
     case missingTransformer(String)
+    case incompatibleVersion(String, expected: Int, actual: Int)
+    case incompatibleOutputSchema(String, expected: Int, actual: Int)
 }
 
 /// Immutable registry injected when the library is initialized.
@@ -130,6 +141,11 @@ public struct TransformerRegistry: Sendable {
             guard !name.isEmpty, name == name.trimmingCharacters(in: .whitespacesAndNewlines) else {
                 throw TransformerRegistryError.invalidName(name)
             }
+            guard transformer.version > 0, transformer.version <= Int(Int32.max),
+                  transformer.outputSchemaVersion > 0,
+                  transformer.outputSchemaVersion <= Int(Int32.max) else {
+                throw TransformerRegistryError.invalidVersion(name)
+            }
             guard indexed[name] == nil else {
                 throw TransformerRegistryError.duplicateName(name)
             }
@@ -139,9 +155,24 @@ public struct TransformerRegistry: Sendable {
         transformersByName = indexed
     }
 
-    public func resolve(name: String) throws -> AnyEmailTransformer {
+    /// Resolve before claiming work; incompatible persisted contracts are blocked.
+    public func resolve(
+        name: String,
+        version: Int,
+        outputSchemaVersion: Int
+    ) throws -> AnyEmailTransformer {
         guard let transformer = transformersByName[name] else {
             throw TransformerRegistryError.missingTransformer(name)
+        }
+        guard transformer.version == version else {
+            throw TransformerRegistryError.incompatibleVersion(
+                name, expected: version, actual: transformer.version
+            )
+        }
+        guard transformer.outputSchemaVersion == outputSchemaVersion else {
+            throw TransformerRegistryError.incompatibleOutputSchema(
+                name, expected: outputSchemaVersion, actual: transformer.outputSchemaVersion
+            )
         }
         return transformer
     }

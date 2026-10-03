@@ -6,6 +6,7 @@
  * progress events, and cooperative cancellation.
  */
 
+/** Canonical string encodings of local UUIDs, distinct from provider IDs. */
 export type AccountID = string;
 export type MailboxID = string;
 export type SyncPlanID = string;
@@ -27,6 +28,7 @@ export type ProviderMessageIdentity = {
 export interface MessageIdentity {
   accountID: AccountID;
   mailboxID: MailboxID;
+  /** Nonzero unsigned 32-bit IMAP values, represented losslessly as numbers. */
   uidValidity: number;
   uid: number;
   providerIdentity?: ProviderMessageIdentity;
@@ -34,6 +36,7 @@ export interface MessageIdentity {
 
 export type MailboxSelection =
   | { kind: "all" }
+  /** Include requires a non-empty unique list owned by the selected account. */
   | { kind: "include"; mailboxIDs: readonly MailboxID[] };
 
 export type SyncMode =
@@ -100,10 +103,11 @@ export interface SyncProgress {
   removedMetadataRecords: number;
   processedMessages: number;
   exportedProcessingResults: number;
+  /** Newly finalized batch rows across both datasets; replays add nothing. */
   archivedRecords: number;
 }
 
-/** Public snapshot backed by the offline SwiftData/Core Data workflow store. */
+/** Public snapshot backed by the offline Core Data workflow store. */
 export interface SyncRunSnapshot {
   runID: SyncRunID;
   planID: SyncPlanID;
@@ -121,7 +125,11 @@ export type SyncBlockingReason =
   | { kind: "authentication-required"; accountID: AccountID }
   | { kind: "network-unavailable" }
   | { kind: "rate-limited"; retryAfter?: ISO8601DateTime }
-  | { kind: "storage-unavailable"; detail: string };
+  | { kind: "storage-unavailable"; detail: string }
+  | { kind: "transformer-missing"; transformerName: string }
+  | { kind: "transformer-incompatible"; transformerName: string }
+  | { kind: "schema-incompatible"; detail: string }
+  | { kind: "policy-required"; detail: string };
 
 export interface SyncFailure {
   code:
@@ -144,9 +152,20 @@ export interface MailboxCheckpoint {
   accountID: AccountID;
   mailboxID: MailboxID;
   uidValidity: number;
+  /** Discovery hint only; does not prove coverage of another date range. */
   highestObservedUID?: number;
   lastSuccessfulSyncAt?: ISO8601DateTime;
   requiresReconciliation: boolean;
+}
+
+export interface SyncPeriodCheckpoint {
+  accountID: AccountID;
+  mailboxID: MailboxID;
+  uidValidity: number;
+  periodStart: ISO8601DateTime;
+  periodEndExclusive: ISO8601DateTime;
+  runID: SyncRunID;
+  completedAt: ISO8601DateTime;
 }
 
 export type SyncEvent =
@@ -169,6 +188,11 @@ export type SyncEvent =
       checkpoint: MailboxCheckpoint;
     }
   | {
+      kind: "period-checkpoint-saved";
+      runID: SyncRunID;
+      checkpoint: SyncPeriodCheckpoint;
+    }
+  | {
       kind: "duckdb-batch-committed";
       runID: SyncRunID;
       batchID: string;
@@ -178,7 +202,8 @@ export type SyncEvent =
       kind: "partition-published";
       runID: SyncRunID;
       mailboxID: MailboxID;
-      /** Calendar month derived from INTERNALDATE, formatted as YYYY-MM. */
+      dataset: "email_metadata" | "processing_results";
+      /** UTC calendar month of the fixed canonical email_date, as YYYY-MM. */
       month: string;
       relativePath: string;
       recordCount: number;
@@ -195,7 +220,9 @@ export interface StartSyncOptions {
  *
  * Planning and execution are separate so the CLI or an app can inspect work
  * before starting it. Plans, runs, tasks, attempts, and checkpoints survive
- * process termination in the offline SwiftData/Core Data store.
+ * process termination in the offline Core Data store. Open-month and arbitrary
+ * date-range plans complete after DuckDB verification; only complete closed
+ * month plans instantiate archive stages.
  */
 export interface SyncClient {
   plan(request: PlanSyncRequest): Promise<SyncPlanSummary>;
@@ -220,6 +247,12 @@ export interface SyncClient {
     accountID: AccountID,
     mailboxID: MailboxID,
   ): Promise<MailboxCheckpoint | undefined>;
+
+  periodCheckpoint(
+    accountID: AccountID,
+    mailboxID: MailboxID,
+    period: SyncPeriod,
+  ): Promise<SyncPeriodCheckpoint | undefined>;
 }
 
 // Example: plan an incremental metadata refresh and observe it to completion.

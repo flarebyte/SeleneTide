@@ -16,3 +16,5 @@ flyb generate markdown --config doc/design-meta
 ```
 
 See the [design source workflow](doc/design-meta/README.md) for editing and rendering details.
+The [consistency review](doc/design-meta/consistency-review.md) records the
+file-by-file audit, corrected contracts, and remaining implementation choices.

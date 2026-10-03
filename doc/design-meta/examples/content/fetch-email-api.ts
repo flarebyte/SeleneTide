@@ -9,7 +9,7 @@
 import type {
   ISO8601DateTime,
   MessageIdentity,
-} from "./sync-api";
+} from "../sync/sync-api";
 
 export type FetchID = string;
 export type ContentLeaseID = string;
@@ -32,8 +32,9 @@ export type ContentTransform =
   | { kind: "html-to-markdown" };
 
 /**
- * Downloaded content always has a finite lease. Callers may release it sooner;
- * the implementation may discard it after the lease expires.
+ * TTL leases expire a positive number of seconds after successful publication.
+ * While-in-use leases have no wall-clock expiry: callers release them, and
+ * shutdown or recovery releases those owned by a terminated process session.
  */
 export type TemporaryRetention =
   | { kind: "while-in-use" }
@@ -45,7 +46,11 @@ export interface FetchEmailRequest {
   transform?: ContentTransform;
   retention: TemporaryRetention;
 
-  /** Reject a transfer before writing content when its known size is larger. */
+  /**
+   * Positive safe-integer aggregate transfer limit. Reject known oversized
+   * selections before transfer; enforce the same limit while streaming when
+   * sizes are unknown, and remove unpublished files after exceeding it.
+   */
   maximumBytes?: number;
 }
 
@@ -85,6 +90,8 @@ export interface FetchFailure {
     | "network-error"
     | "storage-error"
     | "transform-error"
+    | "content-expired"
+    | "content-released"
     | "cancelled"
     | "unexpected";
   message: string;
@@ -155,7 +162,7 @@ export interface CleanupExpiredOptions {
 export interface FetchEmailClient {
   /**
    * Starts a fetch and returns once its durable operation record exists in the
-   * offline SwiftData/Core Data workflow store.
+   * offline Core Data workflow store.
    */
   start(request: FetchEmailRequest): Promise<FetchSnapshot>;
 
@@ -164,16 +171,22 @@ export interface FetchEmailClient {
   /** Emits the current snapshot followed by ordered events until termination. */
   events(fetchID: FetchID): AsyncIterable<FetchEvent>;
 
-  /** Returns content only after the fetch has completed successfully. */
+  /**
+   * Returns content only after successful completion and while its lease is
+   * active; throws content-expired/content-released for unavailable artifacts.
+   */
   result(fetchID: FetchID): Promise<FetchedEmailContent>;
 
-  /** Cooperative cancellation discards unpublished partial content. */
+  /**
+   * Cooperative cancellation discards unpublished partial content. Completed
+   * operations remain completed; their published lease is released explicitly.
+   */
   cancel(fetchID: FetchID): Promise<FetchSnapshot>;
 
   /** Releases one result and makes its artifacts eligible for removal. */
   release(leaseID: ContentLeaseID): Promise<CleanupReport>;
 
-  /** Removes expired leases and abandoned partial downloads. */
+  /** Removes TTL-expired/prior-session while-in-use leases and abandoned partials. */
   cleanupExpired(options: CleanupExpiredOptions): Promise<CleanupReport>;
 }
 

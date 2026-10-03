@@ -116,9 +116,14 @@ export interface ValidatedQuery {
 export interface CompiledDuckDBQuery {
   sql: string;
   /** Ordered values corresponding to DuckDB positional placeholders. */
-  bindings: readonly QueryValue[];
+  bindings: readonly DuckDBBindValue[];
   outputColumns: readonly string[];
 }
+
+/** Internal bridge values; timestamp strings are validated and tagged explicitly. */
+export type DuckDBBindValue =
+  | QueryValue
+  | { kind: "timestamp"; utcISO8601: string };
 
 export type QueryErrorStage =
   | "request"

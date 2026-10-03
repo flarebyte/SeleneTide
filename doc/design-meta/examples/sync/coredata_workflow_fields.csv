@@ -28,14 +28,14 @@ mailbox.checkpoint,Mailbox,checkpoint,MailboxCheckpoint,no,,no,yes,one-to-one; i
 sync_plan.id,SyncPlan,id,UUID,yes,,yes,yes,,Stable plan identifier
 sync_plan.account,SyncPlan,account,Account,yes,,yes,no,many-to-one; inverse=syncPlans,Account to synchronize
 sync_plan.mode,SyncPlan,mode,String,yes,,yes,no,,Raw mode enum: initial incremental or reconcile
-sync_plan.period_kind,SyncPlan,periodKind,String,yes,calendarMonth,no,no,,Raw period enum: calendarMonth or dateRange
+sync_plan.period_kind,SyncPlan,periodKind,String,yes,calendar-month,no,no,,"Raw period enum: calendar-month or date-range, matching the API discriminators"
 sync_plan.period_start,SyncPlan,periodStart,Date,yes,,yes,no,,Inclusive UTC period boundary
 sync_plan.period_end_exclusive,SyncPlan,periodEndExclusive,Date,yes,,yes,no,,Exclusive UTC period boundary
 sync_plan.partition_month,SyncPlan,partitionMonth,String,no,,yes,no,,YYYY-MM when the plan covers exactly one UTC calendar month
 sync_plan.metadata_only,SyncPlan,metadataOnly,Bool,yes,true,no,no,,Invariant preventing content downloads during sync
 sync_plan.state,SyncPlan,state,String,yes,ready,yes,no,,Raw state enum: ready or superseded
 sync_plan.created_at,SyncPlan,createdAt,Date,yes,,no,no,,Plan creation timestamp
-sync_plan.mailbox_selections,SyncPlan,mailboxSelections,[SyncPlanMailbox],yes,[],no,no,one-to-many; inverse=plan; delete=cascade,Explicit mailbox selection; empty represents all mailboxes
+sync_plan.mailbox_selections,SyncPlan,mailboxSelections,[SyncPlanMailbox],yes,[],no,no,one-to-many; inverse=plan; delete=cascade,Empty means all; include selection must contain at least one unique mailbox ID owned by this account
 sync_plan.runs,SyncPlan,runs,[SyncRun],yes,[],no,no,one-to-many; inverse=plan; delete=cascade,Execution history for the plan
 sync_plan_mailbox.id,SyncPlanMailbox,id,UUID,yes,,yes,yes,,Stable selection-row identifier
 sync_plan_mailbox.plan,SyncPlanMailbox,plan,SyncPlan,yes,,yes,no,many-to-one; inverse=mailboxSelections,Owning plan
@@ -60,6 +60,7 @@ sync_run.created_at,SyncRun,createdAt,Date,yes,,no,no,,Run creation timestamp
 sync_run.started_at,SyncRun,startedAt,Date,no,,no,no,,First start timestamp
 sync_run.finished_at,SyncRun,finishedAt,Date,no,,no,no,,Terminal-state timestamp
 sync_run.tasks,SyncRun,tasks,[SyncTask],yes,[],no,no,one-to-many; inverse=run; delete=cascade,Durable task graph for this run
+sync_run.failure_retryable,SyncRun,failureRetryable,Bool,yes,false,no,no,,Retryability of the latest run failure
 sync_task.id,SyncTask,id,UUID,yes,,yes,yes,,Stable task identifier
 sync_task.run,SyncTask,run,SyncRun,yes,,yes,no,many-to-one; inverse=tasks,Owning run
 sync_task.mailbox,SyncTask,mailbox,Mailbox,no,,yes,no,many-to-one,Mailbox scope when applicable
@@ -74,7 +75,7 @@ sync_task.payload_version,SyncTask,payloadVersion,Int,yes,1,no,no,,Schema versio
 sync_task.payload,SyncTask,payload,Data,no,,no,no,,Small versioned Codable parameters; never message content or credentials
 sync_task.result_schema_version,SyncTask,resultSchemaVersion,Int,no,,no,no,,Version of a durable intermediate task result
 sync_task.result_fingerprint,SyncTask,resultFingerprint,String,no,,yes,no,,Integrity and reuse digest for the intermediate result
-sync_task.result_relative_path,SyncTask,resultRelativePath,String,no,,no,no,,Path beneath the account folder for a durable intermediate result too large for workflow state
+sync_task.result_relative_path,SyncTask,resultRelativePath,String,no,,no,no,,Integrity-checked normalized result path beneath the account folder; mandatory before metadata.fetch completion
 sync_task.state,SyncTask,state,String,yes,pending,yes,no,,Raw workflow-state enum
 sync_task.sequence,SyncTask,sequence,Int64,yes,0,yes,no,,Deterministic execution and display ordering
 sync_task.attempt_count,SyncTask,attemptCount,Int,yes,0,no,no,,Number of attempts started
@@ -87,6 +88,11 @@ sync_task.started_at,SyncTask,startedAt,Date,no,,no,no,,Most recent start timest
 sync_task.finished_at,SyncTask,finishedAt,Date,no,,no,no,,Terminal-state timestamp
 sync_task.attempts,SyncTask,attempts,[SyncAttempt],yes,[],no,no,one-to-many; inverse=task; delete=cascade,Attempt history
 sync_task.prerequisites,SyncTask,prerequisites,[SyncTaskDependency],yes,[],no,no,one-to-many; inverse=task; delete=cascade,Dependency edges entering this task
+sync_task.task_key,SyncTask,taskKey,String,yes,,yes,yes,,Deterministic key over run stage mailbox UIDVALIDITY UID and relevant contract version
+sync_task.lease_owner,SyncTask,leaseOwner,String,no,,yes,no,,Current claim identifier; fence task completion by this owner and lease
+sync_task.lease_expires_at,SyncTask,leaseExpiresAt,Date,no,,yes,no,,Expired unfinished task claims may be reclaimed
+sync_task.discovery_cursor,SyncTask,discoveryCursor,String,no,,no,no,,Small durable page cursor saved atomically with emitted child tasks; never a UID array
+sync_task.metadata_export_state,SyncTask,metadataExportState,MetadataExportState,no,,no,no,one-to-one; inverse=task; delete=cascade,Versioned normalized metadata projection checkpoint
 sync_task_dependency.id,SyncTaskDependency,id,UUID,yes,,yes,yes,,Stable dependency-edge identifier
 sync_task_dependency.task,SyncTaskDependency,task,SyncTask,yes,,yes,no,many-to-one; inverse=prerequisites,Task that must wait
 sync_task_dependency.prerequisite,SyncTaskDependency,prerequisite,SyncTask,yes,,yes,no,many-to-one,Task that must complete first; pair must be unique
@@ -106,6 +112,15 @@ mailbox_checkpoint.highest_observed_uid,MailboxCheckpoint,highestObservedUID,Int
 mailbox_checkpoint.last_successful_sync_at,MailboxCheckpoint,lastSuccessfulSyncAt,Date,no,,no,no,,Most recent fully committed mailbox sync
 mailbox_checkpoint.requires_reconciliation,MailboxCheckpoint,requiresReconciliation,Bool,yes,false,yes,no,,Whether incremental state must be rebuilt
 mailbox_checkpoint.updated_at,MailboxCheckpoint,updatedAt,Date,yes,,no,no,,Last checkpoint mutation timestamp
+period_checkpoint.id,SyncPeriodCheckpoint,id,UUID,yes,,yes,yes,,Stable completed-range checkpoint identifier
+period_checkpoint.scope_key,SyncPeriodCheckpoint,scopeKey,String,yes,,yes,yes,,Deterministic account mailbox UIDVALIDITY periodStart periodEndExclusive key
+period_checkpoint.account_id,SyncPeriodCheckpoint,accountID,UUID,yes,,yes,no,,Owning account; encode UUID as canonical string at the API boundary
+period_checkpoint.mailbox_id,SyncPeriodCheckpoint,mailboxID,UUID,yes,,yes,no,,Covered mailbox
+period_checkpoint.uid_validity,SyncPeriodCheckpoint,uidValidity,Int64,yes,,no,no,,Mailbox generation covered by the completed range
+period_checkpoint.period_start,SyncPeriodCheckpoint,periodStart,Date,yes,,no,no,,Inclusive UTC coverage boundary
+period_checkpoint.period_end_exclusive,SyncPeriodCheckpoint,periodEndExclusive,Date,yes,,no,no,,Exclusive UTC coverage boundary
+period_checkpoint.run_id,SyncPeriodCheckpoint,runID,UUID,yes,,no,no,,Last successfully completed run for this scope
+period_checkpoint.completed_at,SyncPeriodCheckpoint,completedAt,Date,yes,,no,no,,Last verified completion timestamp
 fetch_operation.id,FetchOperation,id,UUID,yes,,yes,yes,,Stable fetch identifier
 fetch_operation.account,FetchOperation,account,Account,yes,,yes,no,many-to-one; inverse=fetchOperations,Owning account
 fetch_operation.mailbox,FetchOperation,mailbox,Mailbox,yes,,yes,no,many-to-one,Mailbox containing the message
@@ -126,16 +141,21 @@ fetch_operation.created_at,FetchOperation,createdAt,Date,yes,,no,no,,Fetch creat
 fetch_operation.started_at,FetchOperation,startedAt,Date,no,,no,no,,Fetch start timestamp
 fetch_operation.finished_at,FetchOperation,finishedAt,Date,no,,no,no,,Terminal-state timestamp
 fetch_operation.lease,FetchOperation,lease,ContentLease,no,,no,yes,one-to-one; inverse=fetchOperation; delete=cascade,Lease created after successful publication
+fetch_operation.request_payload,FetchOperation,requestPayload,Data,yes,,no,no,,Versioned Codable complete FetchEmailRequest including body preference inline resources part selection and transform output; no body bytes or secrets
+fetch_operation.request_version,FetchOperation,requestVersion,Int,yes,1,no,no,,Schema version of requestPayload
+fetch_operation.progress_phase,FetchOperation,progressPhase,String,yes,connecting,no,no,,connecting downloading processing or publishing; matches FetchProgress.phase
+fetch_operation.failure_retryable,FetchOperation,failureRetryable,Bool,yes,false,no,no,,Retryability of the latest fetch failure
 content_lease.id,ContentLease,id,UUID,yes,,yes,yes,,Stable lease identifier
 content_lease.fetch_operation,ContentLease,fetchOperation,FetchOperation,yes,,yes,yes,one-to-one; inverse=lease,Fetch operation that produced the content
-content_lease.expires_at,ContentLease,expiresAt,Date,no,,yes,no,,Automatic expiry; absent for while-in-use retention
+content_lease.expires_at,ContentLease,expiresAt,Date,no,,yes,no,,"TTL expiry from successful publication; absent for while-in-use retention, which ends with release or owner-session shutdown"
 content_lease.released_at,ContentLease,releasedAt,Date,no,,yes,no,,Explicit release timestamp
 content_lease.created_at,ContentLease,createdAt,Date,yes,,no,no,,Lease creation timestamp
 content_lease.artifacts,ContentLease,artifacts,[TemporaryArtifact],yes,[],no,no,one-to-many; inverse=lease; delete=cascade,Published temporary artifacts
+content_lease.owner_session_id,ContentLease,ownerSessionID,String,yes,,yes,no,,Process session owning a while-in-use lease; prior-session while-in-use leases are released on recovery
 temporary_artifact.id,TemporaryArtifact,id,UUID,yes,,yes,yes,,Stable artifact identifier
 temporary_artifact.lease,TemporaryArtifact,lease,ContentLease,yes,,yes,no,many-to-one; inverse=artifacts,Owning content lease
 temporary_artifact.role,TemporaryArtifact,role,String,yes,,yes,no,,Raw artifact-role enum
-temporary_artifact.mime_type,TemporaryArtifact,mimeType,String,yes,,no,no,,Normalized MIME media type
+temporary_artifact.mime_type,TemporaryArtifact,mimeType,String,yes,,no,no,,Normalized MIME type/subtype string; parameters are stored separately
 temporary_artifact.filename,TemporaryArtifact,filename,String,no,,no,no,,Sanitized suggested filename
 temporary_artifact.byte_count,TemporaryArtifact,byteCount,Int64,yes,,no,no,,Published file size
 temporary_artifact.relative_path,TemporaryArtifact,relativePath,String,yes,,yes,yes,,Path relative to the account temporary-content folder
@@ -143,3 +163,4 @@ temporary_artifact.part_id,TemporaryArtifact,partID,String,no,,no,no,,IMAP MIME 
 temporary_artifact.content_id,TemporaryArtifact,contentID,String,no,,no,no,,MIME Content-ID for inline resources
 temporary_artifact.sha256,TemporaryArtifact,sha256,String,no,,no,no,,Optional integrity digest
 temporary_artifact.created_at,TemporaryArtifact,createdAt,Date,yes,,no,no,,Artifact publication timestamp
+temporary_artifact.mime_parameters,TemporaryArtifact,mimeParameters,Data,yes,{},no,no,,Versioned canonical JSON string map retaining MIMEType.parameters

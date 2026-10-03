@@ -15,6 +15,7 @@ export const initializationFlow: FlowStep[] = [
     to: "SeleneTideLibrary",
     action: "initialize",
     data: ["configuration", "transformers"],
+    notes: "Acquire exclusive process writer ownership for the shared Core Data store before starting recovery.",
   },
   {
     from: "SeleneTideLibrary",
@@ -27,8 +28,8 @@ export const initializationFlow: FlowStep[] = [
     from: "TransformerRegistry",
     to: "SeleneTideLibrary",
     action: "rejectInitialization",
-    data: ["duplicateName"],
-    when: "a transformer name is duplicated or invalid",
+    data: ["duplicateName", "invalidVersion", "pipelineMismatch"],
+    when: "a transformer registration or current pipeline definition is invalid",
   },
   {
     from: "SeleneTideLibrary",
@@ -107,8 +108,8 @@ export const periodProcessingFlow: FlowStep[] = [
     from: "WorkflowCoordinator",
     to: "CoreDataStore",
     action: "persistDiscoveryPageAndFanOut",
-    data: ["discoveryCheckpoint", "metadataFetchTasks"],
-    notes: "The page checkpoint and idempotent child tasks commit atomically.",
+    data: ["discoveryCursor", "metadataFetchTasks"],
+    notes: "Cursor and idempotent child tasks commit atomically; child tasks run immediately so bounded discovery can drain.",
   },
   {
     from: "WorkflowCoordinator",
@@ -121,14 +122,14 @@ export const periodProcessingFlow: FlowStep[] = [
     from: "IMAPClient",
     to: "IntermediateStore",
     action: "publishNormalizedMetadata",
-    data: ["resultSchemaVersion", "resultFingerprint", "relativePath"],
+    data: ["resultSchemaVersion", "resultFingerprint", "relativePath", "sourceVersion", "canonicalEmailDate"],
     notes: "No message body or attachment bytes are included.",
   },
   {
     from: "WorkflowCoordinator",
     to: "EmailProcessingPipeline",
     action: "startOrReuseJob",
-    data: ["messageIdentity", "emailDate", "inputFingerprint", "pipelineVersion"],
+    data: ["messageIdentity", "emailDate", "inputFingerprint", "pipelineVersion", "sourceRevision", "normalizedMetadata"],
   },
   {
     from: "EmailProcessingPipeline",
@@ -142,7 +143,7 @@ export const periodProcessingFlow: FlowStep[] = [
     to: "DuckDBExporter",
     action: "exportPeriod",
     data: ["accountID", "mailboxID", "period", "batchSize"],
-    when: "discovery is complete and all included processing jobs are terminal",
+    when: "discovery is complete and every included processing job succeeded or succeededWithWarnings",
   },
   {
     from: "DuckDBExporter",
@@ -162,19 +163,21 @@ export const periodProcessingFlow: FlowStep[] = [
     to: "ParquetArchiver",
     action: "archivePeriod",
     data: ["accountID", "mailboxID", "partitionMonth"],
-    when: "the UTC month is closed or an immutable historical range is explicitly requested",
+    when: "the plan covers exactly one complete closed UTC month",
   },
   {
     from: "ParquetArchiver",
     to: "WorkflowCoordinator",
     action: "confirmArchive",
-    data: ["manifestID", "rowCounts", "relativePaths", "sha256"],
+    when: "archive stages were instantiated",
+    data: ["datasetNames", "manifestIDs", "rowCounts", "relativePaths", "sha256"],
   },
   {
     from: "WorkflowCoordinator",
     to: "CoreDataStore",
     action: "completePeriodRun",
-    data: ["finalCounters", "mailboxCheckpoint", "finishedAt"],
+    data: ["finalCounters", "periodCheckpoint", "finishedAt"],
+    notes: "Open-month and partial/multi-month range runs complete after projection verification without archive stages.",
   },
 ];
 
@@ -201,22 +204,23 @@ export const emailTransformationFlow: FlowStep[] = [
   },
   {
     from: "EmailProcessingPipeline",
-    to: "CoreDataStore",
-    action: "claimReadySteps",
-    data: ["leaseOwner", "leaseExpiresAt", "attemptCount"],
-    notes: "Independent dependency branches may be claimed in parallel.",
+    to: "TransformerRegistry",
+    action: "resolve",
+    data: ["transformerName", "stepVersion", "outputSchemaVersion"],
+    notes: "Missing or incompatible implementations block work before consuming an attempt.",
   },
   {
     from: "EmailProcessingPipeline",
-    to: "TransformerRegistry",
-    action: "resolve",
-    data: ["transformerName"],
+    to: "CoreDataStore",
+    action: "claimReadySteps",
+    data: ["leaseOwner", "leaseExpiresAt", "attemptCount"],
+    notes: "The scheduler serializes claims; independent claimed dependency branches execute concurrently.",
   },
   {
     from: "TransformerRegistry",
     to: "EmailTransformer",
     action: "transform",
-    data: ["messageIdentity", "dependencyOutputs", "idempotencyKey"],
+    data: ["messageIdentity", "normalizedMetadata", "dependencyOutputs", "idempotencyKey"],
     notes: "Synchronous transformers use the same async erased call surface.",
   },
   {
@@ -244,12 +248,18 @@ export const emailTransformationFlow: FlowStep[] = [
     to: "CoreDataStore",
     action: "finishJob",
     data: ["succeeded", "succeededWithWarnings", "failed"],
-    when: "all required dependency branches reach a terminal outcome",
+    when: "every instantiated step is terminal and required-step outcomes determine success or failure",
   },
 ];
 
 /** Idempotent Core Data to DuckDB export, including the dual-commit crash gap. */
 export const duckDBProjectionRecoveryFlow: FlowStep[] = [
+  {
+    from: "DuckDBExporter",
+    to: "DuckDBStore",
+    action: "prepareSchema",
+    notes: "Open migrate and validate before claiming Core Data work; retain the in-flight gate across awaits.",
+  },
   {
     from: "DuckDBExporter",
     to: "CoreDataStore",
@@ -272,7 +282,7 @@ export const duckDBProjectionRecoveryFlow: FlowStep[] = [
     to: "DuckDBStore",
     action: "parameterizedUpsert",
     data: ["logicalKey", "sourceVersion", "analyticalColumns", "extensionsJSON"],
-    notes: "Update only when the incoming sourceVersion is equal or newer.",
+    notes: "Update only for strictly newer revisions; equal or newer destination versions are acknowledged no-ops.",
   },
   {
     from: "DuckDBExporter",
@@ -283,7 +293,8 @@ export const duckDBProjectionRecoveryFlow: FlowStep[] = [
     from: "DuckDBExporter",
     to: "CoreDataStore",
     action: "acknowledgeExport",
-    data: ["exportedVersion", "exportedAt", "duckDBSchemaVersion"],
+    data: ["batchID", "claimedSourceVersions", "exportedAt", "duckDBSchemaVersion"],
+    notes: "Fence by batchID and preserve newer source revisions as pending.",
   },
   {
     from: "System",
@@ -323,8 +334,8 @@ export const parquetArchiveFlow: FlowStep[] = [
     from: "ParquetArchiver",
     to: "DuckDBStore",
     action: "claimArchiveBatch",
-    data: ["archiveBatchID", "sourceVersions"],
-    notes: "One transaction copies eligible live rows to exporting and removes those exact live versions.",
+    data: ["dataset", "archiveBatchID", "sourceVersions"],
+    notes: "One transaction claims a complete month per dataset; exporting remains queryable and dataset-specific manifests track separate paths and counts.",
   },
   {
     from: "ParquetArchiver",
@@ -342,13 +353,14 @@ export const parquetArchiveFlow: FlowStep[] = [
     from: "ParquetArchiver",
     to: "ParquetFileSystem",
     action: "verifyAndPublishAtomically",
+    notes: "Publish to immutable batch-specific paths; persist published state and verify the digest on restart before making a generation current.",
     data: ["rowCounts", "schemaVersions", "sha256", "relativePaths"],
   },
   {
     from: "ParquetArchiver",
     to: "DuckDBStore",
     action: "commitManifestAndDeleteStaging",
-    data: ["archiveBatchID", "manifest", "exportingRows"],
+    data: ["archiveBatchID", "manifest", "currentGeneration", "exportingRows"],
     when: "Parquet publication was verified",
   },
   {
@@ -369,6 +381,7 @@ export const parquetArchiveFlow: FlowStep[] = [
     from: "ParquetCompactor",
     to: "ParquetFileSystem",
     action: "atomicallyReplaceCorrectedPartition",
+    notes: "Merge the prior committed partition and fixed overlay revisions into a new generation; preserve newer corrections and retain old files until readers release them.",
     when: "correction compaction policy is satisfied",
   },
 ];
@@ -408,7 +421,7 @@ export const onDemandContentFlow: FlowStep[] = [
     from: "FetchEmailClient",
     to: "CoreDataStore",
     action: "persistContentLeaseAndResult",
-    data: ["leaseID", "expiresAt", "artifacts", "state=completed"],
+    data: ["leaseID", "ownerSessionID", "expiresAt", "artifacts", "state=completed"],
   },
   {
     from: "AppOrCLI",

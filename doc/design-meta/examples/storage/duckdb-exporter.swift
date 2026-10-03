@@ -13,6 +13,7 @@ public struct DuckDBExporterConfiguration: Sendable {
     ) {
         precondition(batchSize > 0)
         precondition(maximumAttempts > 0)
+        precondition(leaseDuration > .zero)
         self.batchSize = batchSize
         self.maximumAttempts = maximumAttempts
         self.leaseDuration = leaseDuration
@@ -66,9 +67,13 @@ public struct DuckDBExportReport: Sendable {
 
 /// Adapter implemented by the embedded DuckDB bridge.
 public protocol DuckDBExportDestination: Sendable {
-    var schemaVersion: Int32 { get async throws }
+    /// Open/migrate/validate the destination before an operational claim is made.
+    func prepareSchema() async throws -> Int32
 
-    /// One DuckDB transaction using prepared parameterized upserts.
+    /// One parameterized transaction; return the number of inserted/changed rows.
+    /// Equal/newer destination revisions are successful no-ops. Every row is
+    /// acknowledged only after the transaction commits. The adapter serializes
+    /// this writer with metadata projection, migrations, and archive claims.
     func upsertProcessingResults(
         _ rows: [DuckDBProcessingResultRow]
     ) async throws -> Int
@@ -82,23 +87,33 @@ public protocol ProcessingExportStateStore: Sendable {
         leaseDuration: Duration
     ) async throws -> DuckDBExportBatch?
 
+    /// Acknowledge only batch.id and its immutable claimed source versions;
+    /// preserve a newer revision as pending and never clear another batch claim.
     func acknowledge(
         batch: DuckDBExportBatch,
         duckDBSchemaVersion: Int32,
         exportedAt: Date
     ) async throws
 
+    /// Fence by batch.id and sourceVersion; never overwrite a replacement claim.
     func recordFailure(
         batch: DuckDBExportBatch,
         error: Error
     ) async throws
 }
 
-/// Dedicated serial coordinator; transformers never write DuckDB directly.
+public enum DuckDBExporterError: Error, Equatable {
+    case batchInProgress
+    case invalidDestinationCount(Int)
+}
+
+/// Processing-result export sketch. Period metadata export uses its own
+/// MetadataExportState adapter with identical checkpoint and replay semantics.
 public actor DuckDBExporter {
     private let stateStore: any ProcessingExportStateStore
     private let destination: any DuckDBExportDestination
     private let configuration: DuckDBExporterConfiguration
+    private var batchInProgress = false
 
     public init(
         stateStore: any ProcessingExportStateStore,
@@ -112,6 +127,12 @@ public actor DuckDBExporter {
 
     /// Exports at most one batch. Replaying a claimed batch is always safe.
     public func exportNextBatch() async throws -> DuckDBExportReport {
+        // An actor can reenter during awaits; retain this gate for the whole batch.
+        guard !batchInProgress else { throw DuckDBExporterError.batchInProgress }
+        batchInProgress = true
+        defer { batchInProgress = false }
+
+        let schemaVersion = try await destination.prepareSchema()
         guard let batch = try await stateStore.claimBatch(
             limit: configuration.batchSize,
             maximumAttempts: configuration.maximumAttempts,
@@ -126,8 +147,10 @@ public actor DuckDBExporter {
         }
 
         do {
-            let schemaVersion = try await destination.schemaVersion
             let committed = try await destination.upsertProcessingResults(batch.rows)
+            guard (0...batch.rows.count).contains(committed) else {
+                throw DuckDBExporterError.invalidDestinationCount(committed)
+            }
             try await stateStore.acknowledge(
                 batch: batch,
                 duckDBSchemaVersion: schemaVersion,
@@ -140,8 +163,14 @@ public actor DuckDBExporter {
                 replayedCount: batch.rows.count - committed
             )
         } catch {
-            try await stateStore.recordFailure(batch: batch, error: error)
-            throw error
+            let originalError = error
+            do {
+                try await stateStore.recordFailure(batch: batch, error: originalError)
+            } catch {
+                // The durable claim remains recoverable after lease expiry.
+                // A failure to save diagnostics must not replace the primary error.
+            }
+            throw originalError
         }
     }
 }

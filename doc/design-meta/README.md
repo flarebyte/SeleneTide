@@ -6,6 +6,13 @@ requirements, storage authority, period workflows, IMAP metadata, Swift
 transformers, DuckDB export and Parquet archival, constrained queries, and
 on-demand content.
 
+The examples are grouped under `requirements/`, `architecture/`, `sync/`,
+`metadata/`, `processing/`, `storage/`, `query/`, and `content/`.
+[`consistency-review.md`](consistency-review.md) records the file-by-file review,
+resolved conflicts, and remaining implementation choices. The workflow field
+table is now `sync/coredata_workflow_fields.csv`, reflecting the selected Core
+Data persistence architecture.
+
 Edit the original CSV, TypeScript, Swift, JSON, and EML artifacts. CSV notes render
 all columns as Markdown tables; TypeScript and JSON notes render as code blocks.
 The TypeScript contracts describe the intended Swift API rather than a TypeScript
@@ -33,3 +40,9 @@ When adding an example, register a file-backed note and a report subsection in
 `app.cue`, using a stable `selenetide.*` note ID. Add relationships where they
 clarify a dependency, then validate and regenerate. Commit the inputs,
 configuration, and generated specification together.
+
+Run the structural and coverage checks after generation:
+
+```sh
+python3 scripts/check-design-examples.py
+```

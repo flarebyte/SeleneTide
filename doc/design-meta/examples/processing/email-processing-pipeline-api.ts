@@ -10,12 +10,20 @@ export type ProcessingJobID = string;
 export type ProcessingStepID = string;
 export type ISO8601DateTime = string;
 
+/** Same metadata-only envelope as the Swift transformer input. */
+export interface NormalizedEmailMetadata {
+  schemaVersion: number;
+  /** Positive Int64 decimal string; identifies the accepted metadata snapshot. */
+  sourceVersion: string;
+  canonicalJSON: Uint8Array;
+}
+
 export interface ProcessableEmail {
   accountID: AccountID;
   mailboxID: MailboxID;
   uidValidity: number;
   emailUID: number;
-  /** UTC timestamp used by first-class Core Data date indexes. */
+  /** Persisted canonical UTC email_date; unchanged across metadata refreshes. */
   emailDate: ISO8601DateTime;
   /** Digest of the source data visible to the pipeline. */
   inputFingerprint: string;
@@ -36,6 +44,7 @@ export interface ProcessingStepDefinition {
   id: ProcessingStepID;
   /** Exact durable lookup key in the injected transformer registry. */
   transformerName: string;
+  /** Positive Int32; must equal the registered EmailTransformer.version. */
   version: number;
   outputSchemaVersion: number;
   required: boolean;
@@ -55,7 +64,7 @@ export type ProcessingJobState =
   | "running"
   | "blocked"
   | "succeeded"
-  | "succeeded-with-warnings"
+  | "succeededWithWarnings"
   | "failed"
   | "cancelled";
 
@@ -63,7 +72,7 @@ export type ProcessingStepState =
   | "pending"
   | "ready"
   | "running"
-  | "retry-waiting"
+  | "retryWaiting"
   | "blocked"
   | "succeeded"
   | "failed"
@@ -76,6 +85,8 @@ export interface ProcessingJobSnapshot {
   email: ProcessableEmail;
   pipelineID: string;
   pipelineVersion: number;
+  /** Positive Int64 decimal string reserved before execution; never reset across jobs. */
+  sourceRevision: string;
   state: ProcessingJobState;
   requiredStepCount: number;
   completedRequiredStepCount: number;
@@ -114,7 +125,11 @@ export interface StepExecutionContext {
   job: ProcessingJobSnapshot;
   step: ProcessingStepSnapshot;
   idempotencyKey: string;
-  /** Successful or reused outputs for declared dependencies only. */
+  metadata: NormalizedEmailMetadata;
+  /**
+   * Outputs for declared dependencies only. An optional failed/skipped
+   * predecessor is absent only when the consumer explicitly allows no output.
+   */
   dependencyOutputs: ReadonlyMap<ProcessingStepID, PersistedStepOutput>;
 }
 
@@ -137,6 +152,8 @@ export type ProcessingEvent =
 
 export interface StartProcessingRequest {
   email: ProcessableEmail;
+  /** Persist a verified managed-file locator before accepting the job. */
+  metadata: NormalizedEmailMetadata;
   pipelineID: string;
   /** Reuse a matching existing job or create one idempotently. */
   ifExists: "reuse";

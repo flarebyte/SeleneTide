@@ -26,10 +26,10 @@ result.failure_code,live|exporting,failure_code,VARCHAR,yes,,Core Data EmailProc
 result.failure_message,live|exporting,failure_message,VARCHAR,yes,,Core Data EmailProcessingStep,Sanitized processing failure summary
 result.input_fingerprint,live|exporting,input_fingerprint,VARCHAR,no,,Core Data EmailProcessingStep,Digest of inputs consumed by the transformer
 result.output_fingerprint,live|exporting,output_fingerprint,VARCHAR,yes,,Exporter,Digest of the exported payload
-result.source_version,live|exporting,source_version,BIGINT,no,conflict_version,Core Data ProcessingResultExportState,Monotonic source revision used by conflict handling
+result.source_version,live|exporting,source_version,BIGINT,no,conflict_version,Core Data ProcessingResultExportState,Globally allocated immutable accepted-result revision; shared sequence prevents resets across jobs
 result.source_updated_at,live|exporting,source_updated_at,TIMESTAMPTZ,no,,Core Data EmailProcessingStep,Last Core Data result update timestamp
-result.exported_from_core_data_at,live|exporting,exported_from_core_data_at,TIMESTAMPTZ,no,,Exporter,Time the DuckDB upsert transaction committed
-result.extensions,live|exporting,extensions,JSON,no,,Exporter,Future transformer-specific analytical values not promoted to columns
+result.exported_from_core_data_at,live|exporting,exported_from_core_data_at,TIMESTAMPTZ,no,,Exporter,Exporter timestamp bound once for the batch before its upsert transaction; not the exact commit time
+result.extensions,live|exporting,extensions,JSON,no,,Exporter,Future values as DuckDB JSON; Parquet uses a MAP of string keys to canonical JSON values
 archive.batch_id,exporting,archive_batch_id,UUID,no,archive_batch,Archive coordinator,Stable DuckDB to Parquet archive batch identifier
 archive.partition_month,exporting,archive_partition_month,VARCHAR,no,archive_partition,Archive coordinator,UTC YYYY-MM target partition
 archive.claimed_at,exporting,archive_claimed_at,TIMESTAMPTZ,no,,Archive coordinator,Time the live row was moved into the exporting table
@@ -40,9 +40,13 @@ manifest.account_id,archive_manifest,account_id,VARCHAR,no,partition_key,Archive
 manifest.mailbox_id,archive_manifest,mailbox_id,VARCHAR,no,partition_key,Archive coordinator,Owning mailbox
 manifest.partition_month,archive_manifest,partition_month,VARCHAR,no,partition_key,Archive coordinator,UTC YYYY-MM partition
 manifest.schema_version,archive_manifest,schema_version,INTEGER,no,,Archive coordinator,Parquet schema version
-manifest.state,archive_manifest,state,VARCHAR,no,,Archive coordinator,Archive state: exporting committed or failed
-manifest.row_count,archive_manifest,row_count,BIGINT,no,,Archive coordinator,Verified exported row count
+manifest.state,archive_manifest,state,VARCHAR,no,,Archive coordinator,Archive state: exporting published committed or failed
+manifest.row_count,archive_manifest,row_count,BIGINT,yes,,Archive coordinator,Verified complete output file row count; absent until write verification
 manifest.parquet_relative_path,archive_manifest,parquet_relative_path,VARCHAR,yes,,Archive coordinator,Published path relative to the account folder
 manifest.parquet_sha256,archive_manifest,parquet_sha256,VARCHAR,yes,,Archive coordinator,Integrity digest of the published Parquet file
 manifest.created_at,archive_manifest,created_at,TIMESTAMPTZ,no,,Archive coordinator,Batch creation timestamp
 manifest.committed_at,archive_manifest,committed_at,TIMESTAMPTZ,yes,,Archive coordinator,Verified publication timestamp
+manifest.dataset,archive_manifest,dataset,VARCHAR,no,partition_key,Archive coordinator,email_metadata or processing_results; each dataset has a separate manifest and path
+manifest.expected_batch_row_count,archive_manifest,expected_batch_row_count,BIGINT,no,,Archive coordinator,Claimed source rows expected in this batch; distinct from verified complete file row_count
+manifest.is_current,archive_manifest,is_current,BOOLEAN,no,,Archive coordinator,False until commit; exactly one committed manifest is current per dataset account mailbox month
+manifest.supersedes_batch_id,archive_manifest,supersedes_batch_id,UUID,yes,,Archive coordinator,Previous current generation replaced by verified correction compaction; null for initial publication
