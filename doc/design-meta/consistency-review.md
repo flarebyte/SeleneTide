@@ -65,7 +65,7 @@ These are missing implementation decisions, rather than contradictory examples. 
 - `scripts/check-design-examples.py` checks all source registrations, generated source links/content, CSV IDs/widths, feature references, entity inverses, stage dependencies/applicability, physical query column mappings, all six supplied requests, and the MIME fixture. It is a structural consistency check, not a production query parser or executor.
 - Both Swift sketches type-check together in Swift 6 mode. `scratch/design-review/SwiftContractProbe.swift` exercises registry version/schema rejection, duplicate registration, synchronous type erasure, reentrancy gating and gate release, schema preparation before claims, preservation of both upsert and acknowledgement errors, and no-op replay acknowledgement.
 - All five TypeScript artifacts pass strict type checking with an ES2022 target, including the relocated cross-folder import.
-- Repeated flyb Markdown generation produces identical bytes and includes all 23 examples.
+- Repeated flyb Markdown generation produces identical bytes. The full specification includes all 23 examples; the executive overview links to detailed sections and these remaining implementation choices. The checker validates both reports, section anchors, and the overview's 500–700 word budget.
 
 ## Repeatable checks
 

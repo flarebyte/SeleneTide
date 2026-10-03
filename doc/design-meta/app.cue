@@ -1,10 +1,14 @@
 package flyb
 
-// Canonical assembly of every design example into one generated specification.
+// Canonical design model for the detailed specification and executive overview.
 // Unsupported Swift/EML extensions use text symlinks in render-inputs/.
 source: "selenetide-design"
 name:   "SeleneTide Swift Library"
 modules: ["core"]
+
+// Shared statements keep the overview and detailed report aligned.
+_libraryPurpose:   "SeleneTide is a Swift library for macOS and iOS that brings IMAP message metadata into durable local storage. A macOS CLI exposes account, sync, fetch, and export operations for interactive and headless use."
+_storageAuthority: "Core Data owns durable operational state, including plans, tasks, checkpoints, processing jobs, step results, and export claims. Keychain owns credentials. Each account has its own analytical files and DuckDB database; DuckDB is a replayable projection of operational results, while Parquet holds verified historical datasets."
 
 argumentRegistry: {
 	version: "1"
@@ -166,6 +170,71 @@ reports: [{
 			},
 		]
 	}]
+}, {
+	title:       "SeleneTide Executive Overview"
+	filepath:    "../design/overview.md"
+	description: "Start here for the design, its essential rules, and links to implementation detail."
+	sections: [
+		{
+			title:       "01 Purpose and Scope"
+			description: """
+\(_libraryPurpose)
+
+The design supports multiple accounts, local metadata analytics, and resumable processing. Normal synchronization fetches headers, flags, dates, sizes, and MIME structure. Message bodies and attachments require an explicit on-demand request and remain disposable content. Swift concurrency is the intended API model; the code examples describe contracts for the future implementation.
+
+[Requirements and use cases](selenetide-specs.md#02-product-requirements).
+"""
+		},
+		{
+			title:       "02 Architecture and Ownership"
+			description: """
+\(_storageAuthority)
+
+One application-local Core Data store isolates operational rows by account ID. Each account has separate analytical and artifact folders. An exclusive process writer lock coordinates apps, CLIs, and daemons; actors coordinate concurrent work within the owning process. Temporary content has a separate lease-managed lifecycle.
+
+[Datastores and authority](selenetide-specs.md#01-datastores-and-authority).
+"""
+		},
+		{
+			title: "03 Main Workflow"
+			description: """
+				**Plan → discover UIDs → fetch metadata → transform → project to DuckDB → verify → archive eligible months.**
+
+				Plans, tasks, page cursors, leases, attempts, and results are durable. Independent message work runs with bounded concurrency. Required processing failures block period export. Open months and partial or multi-month date ranges complete after DuckDB verification; only complete closed UTC months instantiate archive stages. Archival claims immutable, queryable snapshots, verifies Parquet files, then commits manifests and finalizes staging.
+
+				[Workflow stages](selenetide-specs.md#03-period-workflow-stages), [recovery rules](selenetide-specs.md#04-period-workflow-rules), and [archival](selenetide-specs.md#06-duckdb-projection-and-parquet-archival).
+				"""
+		},
+		{
+			title: "04 Critical Invariants"
+			description: """
+				- Message identity is account + mailbox + UIDVALIDITY + UID. Provider IDs correlate locations; sequence numbers never identify durable work.
+				- Canonical UTC email dates and monthly partitions stay stable across refreshes, including fallback dates.
+				- Transformers have durable names and compatible versions. Reuse requires matching inputs and supported outputs; terminal jobs have no unfinished steps.
+				- Globally increasing source revisions prevent stale overwrites. Claims fence completion, and replay never loses newer work or double-counts progress.
+				- Queries combine live rows, exporting snapshots, archives, and corrections. Choose the newest revision before removing tombstones.
+				- Publish verified immutable file generations; retain the previous generation until replacement commits and readers release it. Secrets remain in Keychain.
+
+				[Metadata schema](selenetide-specs.md#04-imap-metadata-and-schema), [processing rules](selenetide-specs.md#01-email-processing-pipeline-rules), and [export rules](selenetide-specs.md#01-duckdb-exporter-rules).
+				"""
+		},
+		{
+			title: "05 Public API Boundaries"
+			description: """
+				[Sync](selenetide-specs.md#06-sync-api-contract) separates planning, execution, resumption, cancellation, status, and events. [Processing](selenetide-specs.md#03-email-processing-api-contract) supplies immutable metadata to registered Swift transformers and persists their versioned outputs. [Queries](selenetide-specs.md#07-constrained-analytics-queries) accept fixed logical datasets and a constrained expression language, compiled to parameterized SQL. [Content fetching](selenetide-specs.md#01-on-demand-email-fetch-api) explicitly selects messages or MIME parts and owns their temporary leases.
+
+				Swift callers use Sendable values, async operations, progress sequences, and cooperative cancellation. The macOS CLI exposes account, sync, fetch, and export operations through these library boundaries.
+				"""
+		},
+		{
+			title: "06 Open Decisions and Next Reading"
+			description: """
+				Implementation choices still include minimum OS/Swift versions, the embedded DuckDB bridge and version, provider authentication details, resource ceilings, physical correction schemas, classification rules, retention, and migrations. Required-failure exclusions need a durable policy before being enabled.
+
+				Use the [full specification](selenetide-specs.md) for implementation details and the [consistency review](../design-meta/consistency-review.md#remaining-implementation-choices) for unresolved decisions. This overview guides navigation; detailed rules, tables, and examples define the contract. Both reports are generated from the same flyb configuration.
+				"""
+		},
+	]
 }]
 
 notes: [
@@ -229,31 +298,31 @@ notes: [
 		labels: ["csv", "example"]
 	},
 	{
-		name:  "selenetide.overview.architecture"
-		title: "Storage and Workflow Boundaries"
+		name:     "selenetide.overview.architecture"
+		title:    "Storage and Workflow Boundaries"
 		markdown: """
-			Core Data owns durable operational state, including plans, tasks, checkpoints, processing jobs, step results, and export claims. Keychain owns credentials. Each account has its own analytical files and DuckDB database; DuckDB is a replayable projection of operational results, while Parquet holds verified historical datasets.
-			
+			\(_storageAuthority)
+
 			A UTC period flows through planning, UID discovery, metadata fetch, per-email processing, DuckDB export and verification, then archive claim, write, publication, and finalization when eligible. Independent per-email work uses bounded concurrency. Archival normally applies to closed calendar months; open-period metadata remains queryable in DuckDB.
-			
+
 			Message fetch identity is account plus mailbox plus UIDVALIDITY plus UID. Provider message identifiers correlate mailbox locations. Canonical UTC email dates, source versions, and schema versions connect the operational, live, and archived representations.
-			
+
 			Queries resolve fixed logical datasets across live rows, queryable exporting snapshots, archives, and corrections. Select the newest source revision before removing tombstones. Downloaded message bodies and attachments belong to the separate on-demand content API and have explicit temporary retention.
-			
+
 			The sections below preserve the detailed tables and API examples. Their rules and field definitions specify each subsystem's completion and recovery behavior.
 			"""
 		labels: ["overview"]
 	},
 	{
-		name:  "selenetide.overview.scope"
-		title: "Scope and Swift API Conventions"
+		name:     "selenetide.overview.scope"
+		title:    "Scope and Swift API Conventions"
 		markdown: """
-			SeleneTide is a Swift library for macOS and iOS that brings IMAP message metadata into durable local storage. A macOS CLI exposes account, sync, fetch, and export operations for interactive and headless use.
-			
+			\(_libraryPurpose)
+
 			The specification covers account isolation and Keychain credentials; metadata-only synchronization; resumable period workflows; versioned per-email transformers; Core Data to DuckDB projection; monthly Parquet archival; constrained analytics; and explicitly requested temporary content.
-			
+
 			TypeScript files are language-neutral API sketches. The production Swift surface uses immutable Sendable values, async operations, AsyncSequence progress events, and cooperative cancellation. Swift examples define native transformer and exporter boundaries; they are design contracts rather than a complete library implementation.
-			
+
 			This document is generated from `doc/design-meta/app.cue` and every source example. Edit those sources and regenerate with `flyb validate --config doc/design-meta` followed by `flyb generate markdown --config doc/design-meta`.
 
 			The [consistency review](../design-meta/consistency-review.md) records resolved contradictions and remaining implementation choices.

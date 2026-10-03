@@ -39,28 +39,60 @@ def escape_cell(value):
     return value.replace("\r\n", "\n").replace("\r", "\n").replace("|", "\\|").replace("\n", "<br/>")
 
 
+def heading_anchors(markdown):
+    anchors, counts = set(), {}
+    in_code = False
+    for line in markdown.splitlines():
+        if line.startswith("```"):
+            in_code = not in_code
+        heading = re.match(r"^#{1,6} (.+)$", line) if not in_code else None
+        if heading:
+            slug = re.sub(r"[^\w -]", "", heading.group(1).lower()).replace(" ", "-")
+            occurrence = counts.get(slug, 0)
+            anchors.add(f"{slug}-{occurrence}" if occurrence else slug)
+            counts[slug] = occurrence + 1
+    return anchors
+
+
+def check_links(generated):
+    for link in re.findall(r"\]\(([^)]+)\)", generated.read_text()):
+        if link.startswith(("https://", "http://")):
+            continue
+        path, _, anchor = link.partition("#")
+        target = generated.parent / path if path else generated
+        require(target.exists(), f"Broken generated link: {link}")
+        if anchor:
+            require(anchor in heading_anchors(target.read_text()), f"Broken section link: {link}")
+
+
 def main():
     paths = sorted(path for path in (META / "examples").rglob("*")
                    if path.is_file() and not path.name.startswith("."))
     tables = {path.name: read_table(path) for path in paths if path.suffix == ".csv"}
     model = json.loads(subprocess.check_output(
         ["cue", "export", "./doc/design-meta", "--out", "json"], cwd=ROOT, text=True))
-    require(len(model["reports"]) == 1, "Expected one specification report")
+    reports = {Path(report["filepath"]).name: report for report in model["reports"]}
+    require(len(reports) == len(model["reports"]) == 2, "Expected two distinct design reports")
+    require(set(reports) == {"selenetide-specs.md", "overview.md"}, "Unexpected design reports")
     file_notes = [note for note in model["notes"] if "filepath" in note]
     targets = [(META / note["filepath"]).resolve(strict=True) for note in file_notes]
     require(len(targets) == len(set(targets)), "An example is registered more than once")
     require(set(targets) == {path.resolve() for path in paths}, "Example coverage differs from flyb notes")
-    referenced = []
+    referenced = set()
 
-    def sections(items):
+    def sections(items, report_references):
         for item in items:
-            referenced.extend(item.get("notes", []))
-            sections(item.get("sections", []))
+            report_references.extend(item.get("notes", []))
+            sections(item.get("sections", []), report_references)
 
-    sections(model["reports"][0]["sections"])
-    require(len(referenced) == len(set(referenced)), "Duplicate report note references")
-    require(set(referenced) == {note["name"] for note in model["notes"]}, "Unreported notes")
-    generated = (META / model["reports"][0]["filepath"]).resolve(strict=True)
+    for report in reports.values():
+        report_references = []
+        sections(report["sections"], report_references)
+        require(len(report_references) == len(set(report_references)), "Duplicate report note references")
+        referenced.update(report_references)
+        check_links((META / report["filepath"]).resolve(strict=True))
+    require(referenced == {note["name"] for note in model["notes"]}, "Unreported notes")
+    generated = (META / reports["selenetide-specs.md"]["filepath"]).resolve(strict=True)
     markdown = generated.read_text()
     for path in paths:
         source_link = f"[{path.name}](../design-meta/{path.relative_to(META).as_posix()})"
@@ -75,9 +107,10 @@ def main():
                 require(line in markdown, f"Missing generated CSV row: {path}: {row[header[0]]}")
         else:
             require(path.read_text().strip() in markdown, f"Missing code/email content: {path}")
-    for link in re.findall(r"\]\(([^)]+)\)", markdown):
-        if not link.startswith(("https://", "http://", "#")):
-            require((generated.parent / link).exists(), f"Broken generated link: {link}")
+    overview = (META / reports["overview.md"]["filepath"]).read_text()
+    visible_overview = re.sub(r"\[([^]]+)\]\([^)]+\)", r"\1", overview)
+    overview_words = len(visible_overview.split())
+    require(500 <= overview_words <= 700, "Keep the executive overview between 500 and 700 words")
 
     feature_ids = {row["feature_id"] for row in tables["features.csv"]}
     for row in tables["practical_use_cases.csv"]:
@@ -209,6 +242,7 @@ def main():
             "MIME fixture alternatives differ")
     print(f"Checked {len(paths)} examples, {sum(map(len, tables.values()))} CSV rows, "
           f"{len(examples)} query requests, entity inverses, stage gates, MIME, and complete generated coverage.")
+    print(f"Checked both reports and their section links; executive overview: {overview_words} words.")
 
 
 if __name__ == "__main__":
