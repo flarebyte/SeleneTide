@@ -1,0 +1,33 @@
+rule_id,area,requirement,rationale
+workflow.scope,Architecture,Use the existing persisted SyncPlan SyncRun SyncTask SyncAttempt and SyncTaskDependency model as the generic period coordinator.,Avoids introducing another orchestration system
+workflow.specialists,Architecture,Delegate IMAP transformation DuckDB and Parquet behavior to their dedicated components and persist only coordination state in the generic workflow.,Keeps task orchestration separate from domain implementation
+workflow.closed_kinds,Architecture,Use a versioned closed set of task kinds from period_workflow_stages.csv rather than runtime-defined arbitrary workflows.,Keeps v1 pragmatic and testable
+period.default,Period,Use one UTC calendar month as the normal workflow period while allowing an explicit UTC half-open date range.,Aligns orchestration with monthly Parquet partitions
+period.boundaries,Period,Represent every period as inclusive periodStart and exclusive periodEndExclusive instants in UTC.,Eliminates overlap and timezone ambiguity
+period.partition,Period,Set partitionMonth only when boundaries exactly match one UTC calendar month.,Prevents incorrectly naming partial ranges as monthly archives
+identity.uid,Identity,Discover IMAP UIDs rather than UUIDs and persist account mailbox UIDVALIDITY and UID on every per-email task.,Uses the durable server identity required for later fetches
+identity.task,Identity,Derive a deterministic task identity from run stage mailbox UIDVALIDITY UID and relevant schema or pipeline version.,Makes dynamic fan-out idempotent after crashes
+discover.pagination,Discovery,Commit each discovery page and its newly created child tasks atomically before requesting the next page.,Avoids losing or duplicating fan-out work after interruption
+discover.complete,Discovery,Do not complete UID discovery until all server result pages are consumed and child-task uniqueness conflicts are resolved as existing work.,Provides a durable enumeration checkpoint
+fetch.metadata,Metadata,Fetch only headers flags dates size BODYSTRUCTURE and provider metadata during metadata.fetch.,Preserves the metadata-only sync boundary
+fetch.result,Metadata,Persist a normalized versioned intermediate result or integrity-checked locator before completing metadata.fetch.,Allows transformations to resume without repeating a successful network fetch
+process.link,Processing,Create or reuse one EmailProcessingJob for each successfully fetched message and persist its ID on the coordinating SyncTask.,Connects generic orchestration to the durable transformation pipeline
+process.parallel,Processing,Allow per-email processing tasks and independent transformers to run concurrently under separate bounded limits.,Provides throughput without unbounded network CPU or I/O work
+process.optional,Processing,Treat succeededWithWarnings as stable for period export while preserving optional transformer failures in analytical results.,Prevents optional work from blocking the whole period
+process.required_failure,Processing,Block period export when a required email-processing job failed unless policy explicitly excludes that message and records the exclusion.,Prevents silent partial analytical datasets
+duckdb.gate,DuckDB,Create DuckDB export tasks only after discovery is complete and every included message has stable fetched metadata and a terminal processing job.,Defines a reproducible period snapshot
+duckdb.contents,DuckDB,Upsert both email metadata using email_metadata_parquet_columns.csv and stable transformer results using duckdb_processing_export_tables.csv.,Produces a joinable analytical period
+duckdb.batches,DuckDB,Run configurable idempotent batches until every eligible source version in the period is acknowledged in Core Data.,Allows restart without restarting the entire period
+duckdb.verify,DuckDB,Verify logical keys source versions expected counts and absence of pending export claims before allowing archival.,Prevents incomplete Parquet publication
+archive.eligibility,Parquet,Archive automatically only after the UTC calendar month is closed; an explicit immutable historical range may be archived immediately.,Avoids racing normal changes in an open month
+archive.snapshot,Parquet,Archive only the immutable DuckDB exporting batch and never query changing live rows while writing a file.,Produces deterministic Parquet output
+archive.contents,Parquet,Write compatible email metadata and processing-result Parquet datasets for the same account mailbox and period.,Preserves their different row grains and join keys
+archive.success,Parquet,Delete DuckDB exporting rows only after atomic Parquet publication verification and manifest commit.,Prevents data loss
+archive.corrections,Parquet,Route changes discovered after archival into the DuckDB correction overlay and compact the affected monthly partition by policy.,Keeps old flags labels moves and expunges correct
+recovery.resume,Recovery,On restart schedule persisted incomplete tasks whose dependencies are satisfied and never recreate completed task output unnecessarily.,Makes the whole multi-stage workflow crash-resumable
+recovery.subsystems,Recovery,Inspect linked processing export and archive identifiers before retrying a coordinating task.,Lets subsystem idempotency close crash gaps
+failure.retry,Failure handling,Apply task-kind-specific bounded retry policies and retain attempts and sanitized errors.,Distinguishes transient IMAP processing storage and archive failures
+failure.blocked,Failure handling,Mark the run blocked when credentials transformers schema compatibility or operator policy prevents safe progress.,Avoids destructive automatic guesses
+backpressure.discovery,Backpressure,Pause discovery fan-out when the number of unfinished per-email tasks exceeds a configured high-water mark.,Bounds Core Data rows memory and network pressure
+completion.run,Completion,Complete the run only after every required stage succeeds all counters reconcile and the account mailbox period checkpoint is committed.,Provides one durable end-to-end outcome
+payload.boundary,Persistence,Keep task payloads small and versioned and never store message bodies credentials or large UID arrays in workflow rows.,Maintains Core Data as an operational store

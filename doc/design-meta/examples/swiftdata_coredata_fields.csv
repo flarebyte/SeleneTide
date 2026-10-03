@@ -28,7 +28,10 @@ mailbox.checkpoint,Mailbox,checkpoint,MailboxCheckpoint,no,,no,yes,one-to-one; i
 sync_plan.id,SyncPlan,id,UUID,yes,,yes,yes,,Stable plan identifier
 sync_plan.account,SyncPlan,account,Account,yes,,yes,no,many-to-one; inverse=syncPlans,Account to synchronize
 sync_plan.mode,SyncPlan,mode,String,yes,,yes,no,,Raw mode enum: initial incremental or reconcile
-sync_plan.since,SyncPlan,since,Date,no,,no,no,,Optional lower bound on IMAP INTERNALDATE
+sync_plan.period_kind,SyncPlan,periodKind,String,yes,calendarMonth,no,no,,Raw period enum: calendarMonth or dateRange
+sync_plan.period_start,SyncPlan,periodStart,Date,yes,,yes,no,,Inclusive UTC period boundary
+sync_plan.period_end_exclusive,SyncPlan,periodEndExclusive,Date,yes,,yes,no,,Exclusive UTC period boundary
+sync_plan.partition_month,SyncPlan,partitionMonth,String,no,,yes,no,,YYYY-MM when the plan covers exactly one UTC calendar month
 sync_plan.metadata_only,SyncPlan,metadataOnly,Bool,yes,true,no,no,,Invariant preventing content downloads during sync
 sync_plan.state,SyncPlan,state,String,yes,ready,yes,no,,Raw state enum: ready or superseded
 sync_plan.created_at,SyncPlan,createdAt,Date,yes,,no,no,,Plan creation timestamp
@@ -44,8 +47,11 @@ sync_run.completed_tasks,SyncRun,completedTasks,Int64,yes,0,no,no,,Completed tas
 sync_run.total_tasks,SyncRun,totalTasks,Int64,yes,0,no,no,,Total planned task count
 sync_run.discovered_messages,SyncRun,discoveredMessages,Int64,yes,0,no,no,,Messages discovered during this run
 sync_run.fetched_metadata_records,SyncRun,fetchedMetadataRecords,Int64,yes,0,no,no,,Metadata records fetched from IMAP
-sync_run.updated_metadata_records,SyncRun,updatedMetadataRecords,Int64,yes,0,no,no,,Metadata records published to Parquet
+sync_run.updated_metadata_records,SyncRun,updatedMetadataRecords,Int64,yes,0,no,no,,Metadata records upserted into the DuckDB live store
 sync_run.removed_metadata_records,SyncRun,removedMetadataRecords,Int64,yes,0,no,no,,Metadata records removed during reconciliation
+sync_run.processed_messages,SyncRun,processedMessages,Int64,yes,0,no,no,,Messages whose required transformation pipeline completed
+sync_run.exported_processing_results,SyncRun,exportedProcessingResults,Int64,yes,0,no,no,,Stable transformation results acknowledged in DuckDB
+sync_run.archived_records,SyncRun,archivedRecords,Int64,yes,0,no,no,,DuckDB rows verified and published to Parquet
 sync_run.blocking_kind,SyncRun,blockingKind,String,no,,yes,no,,Raw blocking-reason enum
 sync_run.blocking_detail,SyncRun,blockingDetail,String,no,,no,no,,Non-secret diagnostic detail
 sync_run.failure_code,SyncRun,failureCode,String,no,,yes,no,,Stable failure code
@@ -58,8 +64,17 @@ sync_task.id,SyncTask,id,UUID,yes,,yes,yes,,Stable task identifier
 sync_task.run,SyncTask,run,SyncRun,yes,,yes,no,many-to-one; inverse=tasks,Owning run
 sync_task.mailbox,SyncTask,mailbox,Mailbox,no,,yes,no,many-to-one,Mailbox scope when applicable
 sync_task.kind,SyncTask,kind,String,yes,,yes,no,,Stable task-kind identifier
+sync_task.stage,SyncTask,stage,String,yes,,yes,no,,Stable period-workflow stage identifier
+sync_task.uid_validity,SyncTask,uidValidity,Int64,no,,yes,no,,Message UIDVALIDITY for per-email tasks
+sync_task.email_uid,SyncTask,emailUID,Int64,no,,yes,no,,Message IMAP UID for per-email tasks
+sync_task.processing_job_id,SyncTask,processingJobID,UUID,no,,yes,no,,Linked EmailProcessingJob identifier for transformation tasks
+sync_task.export_batch_id,SyncTask,exportBatchID,UUID,no,,yes,no,,Linked Core Data to DuckDB export batch
+sync_task.archive_batch_id,SyncTask,archiveBatchID,UUID,no,,yes,no,,Linked DuckDB to Parquet archive batch
 sync_task.payload_version,SyncTask,payloadVersion,Int,yes,1,no,no,,Schema version for the task payload
 sync_task.payload,SyncTask,payload,Data,no,,no,no,,Small versioned Codable parameters; never message content or credentials
+sync_task.result_schema_version,SyncTask,resultSchemaVersion,Int,no,,no,no,,Version of a durable intermediate task result
+sync_task.result_fingerprint,SyncTask,resultFingerprint,String,no,,yes,no,,Integrity and reuse digest for the intermediate result
+sync_task.result_relative_path,SyncTask,resultRelativePath,String,no,,no,no,,Path beneath the account folder for a durable intermediate result too large for workflow state
 sync_task.state,SyncTask,state,String,yes,pending,yes,no,,Raw workflow-state enum
 sync_task.sequence,SyncTask,sequence,Int64,yes,0,yes,no,,Deterministic execution and display ordering
 sync_task.attempt_count,SyncTask,attemptCount,Int,yes,0,no,no,,Number of attempts started

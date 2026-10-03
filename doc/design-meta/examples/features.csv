@@ -25,6 +25,9 @@ workflow.lifecycle,Workflow,Task lifecycle,"Track pending, running, blocked, com
 workflow.retry,Workflow,Retry policy,Record retryable failures and schedule bounded retries with backoff while preserving the underlying error.,must,macOS+iOS
 workflow.audit,Workflow,Task audit trail,Retain task attempts status transitions timestamps and diagnostic summaries for troubleshooting.,should,macOS+iOS
 workflow.progress,Workflow,Progress reporting,Expose account mailbox and overall sync progress to library clients and the CLI.,should,macOS+iOS
+workflow.period,Workflow,Period orchestration,"Coordinate UID discovery metadata fetch per-email transformation DuckDB projection and Parquet archival for a UTC period, normally one calendar month.",must,macOS+iOS
+workflow.fanout,Workflow,Durable per-email fan-out,Create idempotent persisted fetch and processing tasks for every discovered mailbox UID and run independent email work with bounded parallelism.,must,macOS+iOS
+workflow.stage-gates,Workflow,Stage completion gates,Start period export only after all required per-email processing is terminal and start Parquet archival only after DuckDB projection is complete and verified.,must,macOS+iOS
 storage.account-layout,Storage,Account layout,Place metadata workflow state exports and temporary content beneath the owning account subfolder.,must,macOS+iOS
 storage.parquet,Storage,Parquet metadata,"Store normalized message headers and metadata in Parquet with one logical file per account, mailbox, and calendar month.",must,macOS+iOS
 storage.duckdb-hot,Storage,DuckDB hot store,"Keep recent unarchived headers and metadata in a mutable DuckDB database beneath each account folder, normally covering the open UTC calendar month, so frequent refreshes and queries do not rewrite Parquet.",must,macOS+iOS

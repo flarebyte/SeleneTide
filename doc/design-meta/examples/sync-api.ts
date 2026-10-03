@@ -41,14 +41,21 @@ export type SyncMode =
   | "incremental"
   | "reconcile";
 
+export type SyncPeriod =
+  | { kind: "calendar-month"; month: string }
+  | {
+      kind: "date-range";
+      start: ISO8601DateTime;
+      endExclusive: ISO8601DateTime;
+    };
+
 /** Input used to produce a durable, inspectable sync plan. */
 export interface PlanSyncRequest {
   accountID: AccountID;
   mailboxes: MailboxSelection;
   mode: SyncMode;
-
-  /** Optional lower bound on IMAP INTERNALDATE. */
-  since?: ISO8601DateTime;
+  /** UTC half-open period; calendar months use YYYY-MM. */
+  period: SyncPeriod;
 
   /**
    * Metadata-only is the normal mode. This flag does not permit fetching
@@ -61,6 +68,7 @@ export interface SyncPlanSummary {
   planID: SyncPlanID;
   accountID: AccountID;
   mode: SyncMode;
+  period: SyncPeriod;
   createdAt: ISO8601DateTime;
   mailboxCount: number;
   estimatedTaskCount: number;
@@ -90,6 +98,9 @@ export interface SyncProgress {
   fetchedMetadataRecords: number;
   updatedMetadataRecords: number;
   removedMetadataRecords: number;
+  processedMessages: number;
+  exportedProcessingResults: number;
+  archivedRecords: number;
 }
 
 /** Public snapshot backed by the offline SwiftData/Core Data workflow store. */
@@ -117,6 +128,9 @@ export interface SyncFailure {
     | "authentication-failed"
     | "imap-protocol-error"
     | "checkpoint-invalid"
+    | "processing-failed"
+    | "duckdb-export-failed"
+    | "parquet-archive-failed"
     | "storage-error"
     | "cancelled"
     | "unexpected";
@@ -153,6 +167,12 @@ export type SyncEvent =
       kind: "checkpoint-saved";
       runID: SyncRunID;
       checkpoint: MailboxCheckpoint;
+    }
+  | {
+      kind: "duckdb-batch-committed";
+      runID: SyncRunID;
+      batchID: string;
+      recordCount: number;
     }
   | {
       kind: "partition-published";
@@ -206,11 +226,13 @@ export interface SyncClient {
 export async function refreshAccount(
   sync: SyncClient,
   accountID: AccountID,
+  period: SyncPeriod,
 ): Promise<SyncRunSnapshot> {
   const plan = await sync.plan({
     accountID,
     mailboxes: { kind: "all" },
     mode: "incremental",
+    period,
     metadataOnly: true,
   });
 
