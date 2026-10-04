@@ -1,6 +1,8 @@
 # SeleneTide
 Pulling messages into place with the quiet inevitability of the moon moving the tides
 
+![Selene Tide](/SeleneTideHero.jpg)
+
 SeleneTide is a Swift library design for local IMAP metadata synchronization,
 durable email processing, and DuckDB/Parquet analytics on macOS and iOS.
 
