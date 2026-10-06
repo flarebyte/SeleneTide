@@ -117,6 +117,23 @@ def main():
         require(set(row["related_feature_ids"].split(";")) <= feature_ids,
                 f"Unknown feature in {row['use_case_id']}")
 
+    test_catalogue = tables["test_catalog.csv"]
+    require(test_catalogue, "Test catalogue is empty")
+    require(set(test_catalogue[0]) == {
+        "test_id", "test_level", "area", "title", "desc", "related_note_ids"
+    }, "Unexpected test catalogue columns")
+    require({row["test_level"] for row in test_catalogue} == {"unit", "integration"},
+            "Test catalogue must contain unit and integration suites only")
+    spec_notes = {note["name"] for note in model["notes"]} - {"selenetide.testing.catalog"}
+    for row in test_catalogue:
+        require(all(value.strip() for value in row.values()),
+                f"Empty test catalogue field: {row['test_id']}")
+        require(row["test_id"].startswith(row["test_level"] + "."),
+                f"Test ID disagrees with level: {row['test_id']}")
+        related = row["related_note_ids"].split(";")
+        require(len(related) == len(set(related)) and set(related) <= spec_notes,
+                f"Invalid specification references: {row['test_id']}")
+
     workflow_fields = tables["coredata_workflow_fields.csv"]
     pipeline_fields = tables["coredata_email_pipeline_fields.csv"]
     fields = {(row["entity"], row["field"]): row for row in workflow_fields + pipeline_fields}

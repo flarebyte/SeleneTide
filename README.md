@@ -11,9 +11,10 @@ Choose a reading path:
 - **Start here:** the [executive overview](doc/design/overview.md) explains the architecture, main flow, and essential rules in one page.
 - **Implement a subsystem:** the [full specification](doc/design/selenetide-specs.md) contains the rules, schemas, and API examples, with section links from the overview.
 - **Assess open decisions:** the [consistency review](doc/design-meta/consistency-review.md#remaining-implementation-choices) records unresolved choices and the file-by-file audit.
+- **Plan verification:** the [test catalogue](doc/design-meta/examples/testing/test_catalog.csv) lists coarse-grained unit and integration suites to implement, with titles, descriptions, and specification references.
 
 Both generated reports share [the flyb configuration](doc/design-meta/app.cue).
-The full specification includes all 23 artifacts in
+The full specification includes all 24 artifacts in
 [`doc/design-meta/examples`](doc/design-meta/examples).
 
 With `flyb` installed, validate and regenerate both reports from the repository root:

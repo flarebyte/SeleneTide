@@ -169,6 +169,20 @@ reports: [{
 				notes: ["selenetide.content.fixture"]
 			},
 		]
+	}, {
+		title:       "09 Test Plan"
+		description: "Coarse-grained unit and integration suites to implement against the design contracts."
+		sections: [{
+			title: "01 Unit and Integration Test Catalogue"
+			description: """
+				Each row is a planned test suite with a stable ID, level, area, title, description, and specification note references. These entries describe coverage to implement; they do not report implemented or passing tests. Source: [test_catalog.csv](../design-meta/examples/testing/test_catalog.csv).
+
+				Unit suites use controlled clocks, deterministic fixtures, and isolated collaborators. Integration suites exercise real temporary Core Data/DuckDB stores and filesystem artifacts, scripted IMAP/provider responses, and injected failures at persistence boundaries. Use disposable Keychain items for platform authentication checks; ordinary tests do not require personal accounts or live providers.
+
+				Resource limits are parameters of the selected configuration. Tests for optional capabilities apply when those capabilities are implemented; migration, retention, provider setup, and platform tests need expectations from the remaining implementation decisions. The catalogue groups assertions into suites rather than prescribing one test method per row.
+				"""
+			notes: ["selenetide.testing.catalog"]
+		}]
 	}]
 }, {
 	title:       "SeleneTide Executive Overview"
@@ -402,6 +416,13 @@ notes: [
 		labels: ["example", "typescript"]
 	},
 	{
+		name:     "selenetide.testing.catalog"
+		title:    "Planned Unit and Integration Test Suites"
+		filepath: "examples/testing/test_catalog.csv"
+		arguments: ["format-csv=table"]
+		labels: ["csv", "example", "testing"]
+	},
+	{
 		name:     "selenetide.workflow.fields"
 		title:    "Account and Workflow Persistence Fields"
 		filepath: "examples/sync/coredata_workflow_fields.csv"
@@ -538,6 +559,54 @@ relationships: [
 		to:    "selenetide.metadata.imap"
 		label: "fetches"
 		labels: ["fetches"]
+	},
+	{
+		from:  "selenetide.testing.catalog"
+		to:    "selenetide.architecture.datastores"
+		label: "verifies"
+		labels: ["verifies"]
+	},
+	{
+		from:  "selenetide.testing.catalog"
+		to:    "selenetide.content.api"
+		label: "verifies"
+		labels: ["verifies"]
+	},
+	{
+		from:  "selenetide.testing.catalog"
+		to:    "selenetide.export.rules"
+		label: "verifies"
+		labels: ["verifies"]
+	},
+	{
+		from:  "selenetide.testing.catalog"
+		to:    "selenetide.metadata.columns"
+		label: "verifies"
+		labels: ["verifies"]
+	},
+	{
+		from:  "selenetide.testing.catalog"
+		to:    "selenetide.processing.rules"
+		label: "verifies"
+		labels: ["verifies"]
+	},
+	{
+		from:  "selenetide.testing.catalog"
+		to:    "selenetide.product.features"
+		label: "verifies"
+		labels: ["verifies"]
+	},
+	{
+		from:  "selenetide.testing.catalog"
+		to:    "selenetide.query.rules"
+		label: "verifies"
+		labels: ["verifies"]
+	},
+	{
+		from:  "selenetide.testing.catalog"
+		to:    "selenetide.workflow.rules"
+		label: "verifies"
+		labels: ["verifies"]
 	},
 	{
 		from:  "selenetide.workflow.rules"

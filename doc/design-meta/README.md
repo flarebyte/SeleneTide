@@ -5,8 +5,8 @@
 [full specification](../design/selenetide-specs.md). The full report assembles
 every artifact in `examples/` and covers
 requirements, storage authority, period workflows, IMAP metadata, Swift
-transformers, DuckDB export and Parquet archival, constrained queries, and
-on-demand content.
+transformers, DuckDB export and Parquet archival, constrained queries,
+on-demand content, and planned test coverage.
 
 Start with the overview, follow its section links for implementation detail,
 and read the consistency review for unresolved decisions. Keep the overview
@@ -16,11 +16,18 @@ detailed report through CUE fields. When changing a design rule, update its
 summary in the same configuration and regenerate both reports.
 
 The examples are grouped under `requirements/`, `architecture/`, `sync/`,
-`metadata/`, `processing/`, `storage/`, `query/`, and `content/`.
+`metadata/`, `processing/`, `storage/`, `query/`, `content/`, and `testing/`.
 [`consistency-review.md`](consistency-review.md) records the file-by-file review,
 resolved conflicts, and remaining implementation choices. The workflow field
 table is now `sync/coredata_workflow_fields.csv`, reflecting the selected Core
 Data persistence architecture.
+
+[`testing/test_catalog.csv`](examples/testing/test_catalog.csv) records planned
+coarse-grained suites: 20 unit and 26 integration. Columns identify each suite's
+stable ID, test level, area, title, `desc`, and semicolon-separated specification
+note IDs. A row groups related assertions; it is not an implementation or a test
+result. The full report's test-plan section describes fixtures, failure injection,
+and how unresolved policies or optional capabilities affect the expectations.
 
 Edit the original CSV, TypeScript, Swift, JSON, and EML artifacts. CSV notes render
 all columns as Markdown tables; TypeScript and JSON notes render as code blocks.
@@ -57,4 +64,5 @@ python3 scripts/check-design-examples.py
 ```
 
 The checker verifies both generated reports and their section links, complete
-example coverage in the full report, and the overview's word budget.
+example coverage in the full report, test catalogue levels and specification
+references, and the overview's word budget.

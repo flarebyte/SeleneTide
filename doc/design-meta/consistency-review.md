@@ -1,6 +1,6 @@
 # Design example consistency review
 
-All 23 original artifacts were read and cross-checked. The examples now live in eight subsystem folders; source links, TypeScript imports, and flyb rendering symlinks follow their new locations. This review checks design contracts and executable sketches, not a production library implementation.
+All 23 original artifacts were read and cross-checked and organized into eight subsystem folders; source links, TypeScript imports, and flyb rendering symlinks follow their new locations. A subsequent planned test catalogue adds a ninth folder, `testing/`, and brings the current total to 24 artifacts. This review checks design contracts and executable sketches, not a production library implementation.
 
 ## Resolved cross-file conflicts
 
@@ -46,6 +46,7 @@ All 23 original artifacts were read and cross-checked. The examples now live in 
 | [email_query_examples.json](examples/query/email_query_examples.json) | Consistent; unchanged | All six requests use allowed fields/aggregates, output-local aliases, correctly referenced variables, and valid result modes. Their timestamp strings now have a defined typed-binding policy. |
 | [fetch-email-api.ts](examples/content/fetch-email-api.ts) | Corrected | Updated the moved import; distinguished TTL from session-owned while-in-use leases; defined streaming transfer limits, expired/released results, and cancellation of active versus completed operations. |
 | [simple_email_with_html.eml](examples/content/simple_email_with_html.eml) | Consistent; unchanged | Parsed successfully as multipart/alternative with plain-text and HTML parts, no MIME defects, and no attachments; metadata and on-demand APIs support this shape. |
+| [test_catalog.csv](examples/testing/test_catalog.csv) | Added after original audit | Plans 20 unit and 26 integration suites with titles, descriptions, and valid specification-note references. Covers recovery, claims, revision ordering, archival, queries, content, accounts, CLI, and platform boundaries; these are tests to implement, not execution results. |
 
 ## Remaining implementation choices
 
@@ -62,10 +63,10 @@ These are missing implementation decisions, rather than contradictory examples. 
 ## Validation evidence
 
 - `flyb validate`, name lint, and example orphan lint pass with no diagnostics.
-- `scripts/check-design-examples.py` checks all source registrations, generated source links/content, CSV IDs/widths, feature references, entity inverses, stage dependencies/applicability, physical query column mappings, all six supplied requests, and the MIME fixture. It is a structural consistency check, not a production query parser or executor.
+- `scripts/check-design-examples.py` checks all source registrations, generated source links/content, CSV IDs/widths, feature references, test catalogue levels/descriptions/note references, entity inverses, stage dependencies/applicability, physical query column mappings, all six supplied requests, and the MIME fixture. It is a structural consistency check, not a production query parser or executor.
 - Both Swift sketches type-check together in Swift 6 mode. `scratch/design-review/SwiftContractProbe.swift` exercises registry version/schema rejection, duplicate registration, synchronous type erasure, reentrancy gating and gate release, schema preparation before claims, preservation of both upsert and acknowledgement errors, and no-op replay acknowledgement.
 - All five TypeScript artifacts pass strict type checking with an ES2022 target, including the relocated cross-folder import.
-- Repeated flyb Markdown generation produces identical bytes. The full specification includes all 23 examples; the executive overview links to detailed sections and these remaining implementation choices. The checker validates both reports, section anchors, and the overview's 500–700 word budget.
+- Repeated flyb Markdown generation produces identical bytes. The full specification includes all 24 examples; the executive overview links to detailed sections and these remaining implementation choices. The checker validates both reports, section anchors, and the overview's 500–700 word budget.
 
 ## Repeatable checks
 
