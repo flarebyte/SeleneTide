@@ -10,6 +10,7 @@ credentials are caller-supplied and held only in memory. CLI features are deferr
 
 Choose a reading path:
 
+- **AI coding agents:** use the [task-focused entry point](doc/design-meta/AGENTS.md) to retrieve relevant source records and contracts selectively.
 - **Start here:** the [executive overview](doc/design/overview.md) explains the architecture, main flow, and essential rules in one page.
 - **Implement a subsystem:** the [full specification](doc/design/selenetide-specs.md) contains the rules, schemas, and API examples, with section links from the overview.
 - **Assess open decisions:** the [consistency review](doc/design-meta/consistency-review.md#remaining-implementation-choices) records unresolved choices and the file-by-file audit.

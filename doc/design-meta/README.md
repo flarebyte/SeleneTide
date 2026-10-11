@@ -1,5 +1,8 @@
 # SeleneTide specification sources
 
+**AI agents:** start with [AGENTS.md](AGENTS.md) for task-focused searches,
+source routing, and dependency retrieval before opening the full specification.
+
 `app.cue` generates two reports: the one-page
 [executive overview](../design/overview.md) and the
 [full specification](../design/selenetide-specs.md). The full report assembles
