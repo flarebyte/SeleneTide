@@ -1,7 +1,7 @@
 /**
- * Language-neutral design reference for the Core Data email-processing
- * pipeline. Production code uses equivalent Swift Sendable values, actors,
- * async functions, and NSManagedObjectID boundaries.
+ * Language-neutral design reference for the SQLite email-processing
+ * pipeline. Production Rust code uses owned snapshots, stable row IDs,
+ * session-owned workers, and explicit SQL transactions.
  */
 
 export type AccountID = string;
@@ -10,7 +10,7 @@ export type ProcessingJobID = string;
 export type ProcessingStepID = string;
 export type ISO8601DateTime = string;
 
-/** Same metadata-only envelope as the Swift transformer input. */
+/** Same metadata-only envelope as the Rust transformer input. */
 export interface NormalizedEmailMetadata {
   schemaVersion: number;
   /** Positive Int64 decimal string; identifies the accepted metadata snapshot. */
@@ -97,7 +97,7 @@ export interface ProcessingJobSnapshot {
 }
 
 export interface ProcessingStepSnapshot {
-  stepObjectID: string;
+  stepID: string;
   jobID: ProcessingJobID;
   stepID: ProcessingStepID;
   transformerName: string;
@@ -160,7 +160,7 @@ export interface StartProcessingRequest {
 }
 
 /**
- * A small actor-backed coordinator. Core Data remains the source of truth;
+ * A small worker-backed coordinator. SQLite remains the source of truth;
  * this interface does not imply an external queue or general workflow engine.
  */
 export interface EmailProcessingPipeline {

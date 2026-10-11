@@ -2,8 +2,8 @@
  * Language-neutral design reference for the SeleneTide sync API.
  *
  * TypeScript is used to make the contract concise. The production library will
- * expose equivalent Swift Sendable values, async functions, AsyncSequence
- * progress events, and cooperative cancellation.
+ * use owned Rust values and session-owned workers. Promise and AsyncIterable
+ * denote host-adapter conveniences over operation IDs and event polling at the C ABI.
  */
 
 /** Canonical string encodings of local UUIDs, distinct from provider IDs. */
@@ -107,7 +107,7 @@ export interface SyncProgress {
   archivedRecords: number;
 }
 
-/** Public snapshot backed by the offline Core Data workflow store. */
+/** Public snapshot backed by the offline SQLite workflow store. */
 export interface SyncRunSnapshot {
   runID: SyncRunID;
   planID: SyncPlanID;
@@ -218,9 +218,9 @@ export interface StartSyncOptions {
 /**
  * Primary sync boundary.
  *
- * Planning and execution are separate so the CLI or an app can inspect work
+ * Planning and execution are separate so a frontend backend can inspect work
  * before starting it. Plans, runs, tasks, attempts, and checkpoints survive
- * process termination in the offline Core Data store. Open-month and arbitrary
+ * process termination in the offline SQLite store. Open-month and arbitrary
  * date-range plans complete after DuckDB verification; only complete closed
  * month plans instantiate archive stages.
  */

@@ -1,72 +1,71 @@
-# Design example consistency review
+# SeleneTide design consistency review
 
-All 23 original artifacts were read and cross-checked and organized into eight subsystem folders; source links, TypeScript imports, and flyb rendering symlinks follow their new locations. A subsequent planned test catalogue adds a ninth folder, `testing/`, and brings the current total to 24 artifacts. This review checks design contracts and executable sketches, not a production library implementation.
+The current baseline is a portable Rust library with a stateful C ABI and SQLite
+operational persistence. The contracts describe a future implementation; there is
+no production library or CLI in this repository.
 
-## Resolved cross-file conflicts
+## Resolved design choices
 
-1. **Storage ownership.** Requirements placed workflow files beneath each account, while the datastore table and processing rules specified one application-local Core Data store. The selected design uses shared operational rows isolated by accountID and separate per-account analytical/artifact folders. An exclusive process writer lock is required because an actor only coordinates one process.
-2. **Analytical revisions and keys.** A new processing step originally started at sourceVersion 1 even though its DuckDB key could match an older job. Inputs and corrections now reserve globally increasing Int64 revisions in Core Data. An older accepted job finishing later cannot overwrite a newer result. Each pipeline uses a transformer name at most once, and analytics retain the latest result per message/name/version rather than all execution history.
-3. **Archive query visibility.** Claiming an archive moved live rows into exporting tables that queries did not include. Both logical datasets now include exporting snapshots and correction overlays, choose the newest revision, and only then remove tombstones. Processing deletions must be reconciled as well as metadata deletions.
-4. **Archive publication and replacement.** Metadata and processing results had one manifest shape without a dataset key. Their manifests now have separate paths, versions, and counts. Published and committed are distinct states. Immutable batch-specific file generations preserve the prior committed partition until the new manifest becomes current; old files remain until readers release them. Partial batches cannot replace a complete monthly archive.
-5. **Period completion.** Every run previously depended on archive finalization even though an open month could not be archived. Only complete closed-month plans instantiate archive stages. Open-month and arbitrary partial/multi-month ranges complete after DuckDB verification; a later complete-month plan can archive their rows.
-6. **Discovery and range checkpoints.** Waiting for whole-mailbox discovery before consuming children could prevent the backpressure queue from draining. Children now depend on their committed producing page. Per-period coverage is stored separately from the mailbox UID hint so one range does not silently suppress another.
-7. **Persisted operation inputs.** Generic tasks lacked claims and page cursors; fetch records lacked body preference, inline-resource/transform options, progress phase, and failure retryability. Those fields now exist. Metadata export has durable versioned claims and acknowledgements just like processing export.
-8. **Transformer inputs and completion.** The first transformer had no metadata input, and a job could succeed with optional work still running. Both native and language-neutral contracts now supply a verified persisted metadata envelope. Every instantiated step is terminal before publishing a terminal job, and optional no-output dependencies are explicit.
-9. **Transformer compatibility and reuse.** Name-only resolution could run a persisted old version with a new implementation. Registry resolution validates version and output schema before claiming an attempt. Reused output is copied into the new step so its analytical export does not depend solely on a historical pointer.
-10. **Swift exporter behavior.** Actor suspension allowed overlapping batches. An explicit gate now spans all awaits, schema preparation precedes a Core Data claim, no-op replays are acknowledged, and a failure to save diagnostics does not mask the primary export error. Store protocol comments fence saves by batch and claimed revision.
-11. **Canonical metadata.** Recomputing a fallback from the latest fetch time could move an unchanged message into another month. Canonical email_date and its provenance are chosen once and retained with firstSeenAt in the latest checkpoint. Sender domain, attachment count, thread depth, and delay derivations use matching rules.
-12. **Query contracts.** Fixed the processing dataset spelling and physical field mappings. Defined typed UTC timestamp bindings for the existing date-range examples, safe default projections, grouped rows, local aggregate aliases, relationship namespaces, and malformed collection handling. Repeatable exports require explicit ordering and stable tie-breakers.
-13. **Content lifetime.** Finite-lease prose contradicted while-in-use leases without expiresAt. TTL expiry and owner-session release are now separate. Transfer limits apply during streaming, and cancelling a completed fetch does not implicitly release its result.
-14. **Priorities and terminology.** Kept existing feature priorities as the scope baseline and aligned the corresponding optional use cases. Removed mixed SwiftData/Core Data architecture wording and renamed the workflow field table to reflect the chosen persistence layer.
+- **Session ownership.** A frontend backend opens a session and retains its handle
+  across requests. The session owns workers, configuration, SQLite connections,
+  per-account DuckDB connections, credentials, and authenticated IMAP connections.
+  Close rejects new calls, drains admitted work, clears credentials, closes stores,
+  releases exclusive root ownership, and invalidates the handle.
+- **Portable persistence.** SQLite owns accounts, plans, tasks, checkpoints,
+  processing results, revision allocation, leases, and export claims. Explicit SQL
+  transactions, migrations, foreign keys, unique identities, and bounded busy
+  handling replace managed-object contexts. Relationships use foreign keys or
+  join tables; export references use stable step IDs. One root has one owning
+  session; account rows remain isolated within a shared operational database.
+- **Caller-supplied authentication.** Each request selects exactly one of PLAIN,
+  XOAUTH2, OAUTHBEARER, or SCRAM-SHA-256 with username and password or accessToken.
+  Authentication remains in memory; the host owns OAuth consent, token refresh,
+  and any secret persistence. Replacement fences stale authentication generations.
+  Network work requires verified TLS and explicit server mechanism support.
+- **Interop.** The C header specifies process-local session tokens, pointer-length
+  UTF-8 JSON buffers, status values, output ownership, and explicit freeing. Long
+  work returns operation IDs; polling, cancellation, result pages, and bounded
+  event queues avoid requiring a host async runtime. The API validates versions,
+  handles, methods, and payloads and contains panics at foreign boundaries.
+- **UniFFI.** Optional generated records, enums, objects, and async conveniences
+  can adapt the same Rust model. Generated scaffolding is distinct from the public
+  C ABI and must be pinned with its bindings. See the
+  [official UniFFI guide](https://mozilla.github.io/uniffi-rs/).
+- **Scope.** CLI commands, exit codes, and command-based automation are deferred.
+  CSV/JSON library export remains in scope. Required Apple services and OS
+  credential-store integration have been removed.
+- **Existing recovery rules.** Durable revisions, fenced claims, idempotent
+  projection, queryable archive snapshots, atomic verified Parquet publication,
+  correction overlays, and metadata-only synchronization still apply. Credentials
+  and session operation IDs expire on restart; durable domain run IDs remain resumable.
 
-## File-by-file ledger
+## Source coverage
 
-| Source | Outcome | Review and correction |
-| --- | --- | --- |
-| [features.csv](examples/requirements/features.csv) | Corrected | Storage scope now distinguishes shared Core Data rows from per-account files; archive staging, canonical dates, and query visibility agree with subsystem rules. |
-| [practical_use_cases.csv](examples/requirements/practical_use_cases.csv) | Corrected | Aligned optional IMAP setup, headless automation, and selective-content scenarios with existing feature priorities; updated archive eligibility and live/history query wording. |
-| [datastores.csv](examples/architecture/datastores.csv) | Corrected | Core Data owns a single shared operational store with exclusive process writer ownership; exporting snapshots are queryable and lease ownership is explicit. |
-| [library-processing-flows.ts](examples/architecture/library-processing-flows.ts) | Corrected | Resolve compatible transformers before claiming; metadata is supplied to transformers; page children can drain; open periods complete without archives; projection and manifest commit gaps match their rules. |
-| [sync-api.ts](examples/sync/sync-api.ts) | Corrected | Added period checkpoints, dataset-qualified publication events, missing blocking reasons, UUID/UID encoding, and explicit open-period completion semantics. |
-| [period_workflow_stages.csv](examples/sync/period_workflow_stages.csv) | Corrected | Page-level completion enables child consumption; archive stages apply only to complete closed months; dataset-specific manifests distinguish published from committed state. |
-| [period_workflow_rules.csv](examples/sync/period_workflow_rules.csv) | Corrected | Added range coverage, claim fencing, page backpressure semantics, metadata checkpoints, process ownership, cancellation/resume, and replay-safe progress. |
-| [coredata_workflow_fields.csv](examples/sync/coredata_workflow_fields.csv) | Corrected; renamed | Formerly swiftdata_coredata_fields.csv. Selected Core Data architecture; added task keys/leases/cursors, period coverage, fetch request/progress/failure fields, session-owned leases, and MIME parameters. |
-| [imap_email_metadata.csv](examples/metadata/imap_email_metadata.csv) | Corrected | Removed the UTF-8 BOM and normalized line endings; preserved Gmail IDs as decimal text and matched sender, attachment, thread-depth, and delay derivations to the storage schema. |
-| [email_metadata_parquet_columns.csv](examples/metadata/email_metadata_parquet_columns.csv) | Corrected | Added source_version, fixed canonical email_date, and date provenance; defined stable derivation heuristics and preserved date/partition identity across refreshes. |
-| [email-processing-pipeline-api.ts](examples/processing/email-processing-pipeline-api.ts) | Corrected | Persisted state spellings match rules; revisions use Int64 decimal strings; normalized metadata appears in both job requests and execution context. |
-| [email-transformer.swift](examples/processing/email-transformer.swift) | Corrected | Added a metadata-only input envelope; registry checks positive Int32 versions and rejects incompatible persisted transformer/output-schema contracts. |
-| [email_processing_pipeline_rules.csv](examples/processing/email_processing_pipeline_rules.csv) | Corrected | Jobs become exportable only after all steps are terminal; optional dependencies are explicit; reuse copies output; metadata snapshots and accepted-input revisions survive restart. |
-| [coredata_email_pipeline_fields.csv](examples/processing/coredata_email_pipeline_fields.csv) | Corrected | Added indexed step identities, job metadata locators, job source revisions, a shared revision allocator, and complete metadata export checkpoints; grouped fields by entity. |
-| [duckdb-exporter.swift](examples/storage/duckdb-exporter.swift) | Corrected | An in-flight gate survives actor reentrancy; schema preparation precedes claims; acknowledgements are revision-fenced and secondary diagnostic failures preserve the original error. Sample scope is processing-result export. |
-| [duckdb_exporter_rules.csv](examples/storage/duckdb_exporter_rules.csv) | Corrected | Revisions never reset across jobs; equal versions are no-ops; queryable snapshots and dataset-specific immutable archive generations close commit gaps; metadata follows the same checkpoint semantics. |
-| [duckdb_processing_export_tables.csv](examples/storage/duckdb_processing_export_tables.csv) | Corrected | Manifest dataset, expected batch count, verified file count, published state, current generation, and superseded batch are explicit; extension conversion and exporter timestamps match their actual meanings. |
-| [query-api.ts](examples/query/query-api.ts) | Corrected | The bridge binding type represents validated UTC timestamps explicitly; JSON query values remain separate from internal typed parameters. |
-| [query_api_rules.csv](examples/query/query_api_rules.csv) | Corrected | Logical relations include staging/corrections; choose winning versions before removing tombstones; documented defaults, grouped projections, aliases, timestamp bindings, malformed collections, and deterministic exports. |
-| [query_catalog.csv](examples/query/query_catalog.csv) | Corrected | Fixed singular processing_result dataset name; email_date resolves to a persisted column; added processing UIDVALIDITY and matched physical catalogue columns to both schemas. |
-| [email_query_examples.json](examples/query/email_query_examples.json) | Consistent; unchanged | All six requests use allowed fields/aggregates, output-local aliases, correctly referenced variables, and valid result modes. Their timestamp strings now have a defined typed-binding policy. |
-| [fetch-email-api.ts](examples/content/fetch-email-api.ts) | Corrected | Updated the moved import; distinguished TTL from session-owned while-in-use leases; defined streaming transfer limits, expired/released results, and cancellation of active versus completed operations. |
-| [simple_email_with_html.eml](examples/content/simple_email_with_html.eml) | Consistent; unchanged | Parsed successfully as multipart/alternative with plain-text and HTML parts, no MIME defects, and no attachments; metadata and on-demand APIs support this shape. |
-| [test_catalog.csv](examples/testing/test_catalog.csv) | Added after original audit | Plans 20 unit and 26 integration suites with titles, descriptions, and valid specification-note references. Covers recovery, claims, revision ordering, archival, queries, content, accounts, CLI, and platform boundaries; these are tests to implement, not execution results. |
+All 27 example artifacts are registered in the full report. New `api/` sources
+specify session payloads, authentication alternatives, the C header, and lifecycle
+rules. Both persistence tables use SQLite names and explicit storage mappings.
+Rust sketches replace the transformer and exporter sketches. Requirements, use
+cases, processing flows, recovery rules, and the planned test catalogue follow
+the same architecture. The catalogue contains 21 unit and 27 integration suites;
+these are planned tests, not implemented test results.
 
 ## Remaining implementation choices
 
-These are missing implementation decisions, rather than contradictory examples. They should be resolved before treating the design as an implementation-complete library contract.
-
-- Minimum macOS/iOS and Swift versions, Swift Package layout, a pinned embedded DuckDB version, and the native bridge/build arrangement remain unspecified.
-- Provider OAuth scopes, credential-item/access-group/accessibility settings, and the concrete exclusive process writer lock need implementation designs and platform verification.
-- Concrete concurrency, retry, query token/depth, value-size, row-limit, and output-expansion ceilings are not all assigned defaults. Only the Swift processing-export sketch has batch/attempt/lease defaults.
-- Physical correction/tombstone tables and the complete processing-result Parquet type table are not provided. Their logical keys, revision precedence, deletion semantics, and extension conversion are defined; migrations and physical mappings still need their own artifacts.
-- Bulk-classification labels and heuristics are still deliberately versioned but unspecified. Address normalization, malformed MIME handling, and metadata decoding limits need concrete policies.
-- Retention durations, account deletion cleanup, incompatible-store migrations, and support/migration of historical pipeline definitions require explicit policies. The latest metadata identity checkpoint and referenced inputs must survive any pruning policy.
-- A required-processing-failure exclusion mechanism has no request or persistence artifact. Default behavior is to block period export; enable exclusions only after their policy and durable record format are designed.
-
-## Validation evidence
-
-- `flyb validate`, name lint, and example orphan lint pass with no diagnostics.
-- `scripts/check-design-examples.py` checks all source registrations, generated source links/content, CSV IDs/widths, feature references, test catalogue levels/descriptions/note references, entity inverses, stage dependencies/applicability, physical query column mappings, all six supplied requests, and the MIME fixture. It is a structural consistency check, not a production query parser or executor.
-- Both Swift sketches type-check together in Swift 6 mode. `scratch/design-review/SwiftContractProbe.swift` exercises registry version/schema rejection, duplicate registration, synchronous type erasure, reentrancy gating and gate release, schema preparation before claims, preservation of both upsert and acknowledgement errors, and no-op replay acknowledgement.
-- All five TypeScript artifacts pass strict type checking with an ES2022 target, including the relocated cross-folder import.
-- Repeated flyb Markdown generation produces identical bytes. The full specification includes all 24 examples; the executive overview links to detailed sections and these remaining implementation choices. The checker validates both reports, section anchors, and the overview's 500–700 word budget.
+- Minimum Rust version, crate layout, exact Linux/Windows/macOS target matrix,
+  pinned SQLite/DuckDB and IMAP/TLS adapters, optional UniFFI target languages,
+  and static/dynamic packaging remain to be selected.
+- Portable exclusive root locking, migration SQL, complete relational DDL,
+  connection pool sizes, timeouts, runtime choice, panic containment, and secret
+  memory clearing need implementation and integration verification.
+- Request/response sizes, event queue bounds, query depth/token limits, retry
+  ceilings, and worker limits need defaults. Exporter sketch defaults cover only
+  batch size, attempts, and claim duration.
+- Physical correction/tombstone tables, processing-result Parquet type mappings,
+  classification labels, address normalization, malformed MIME handling, and
+  decoding limits need concrete schemas or policies.
+- Retention durations, account deletion, incompatible schema migration, and
+  support for historical pipeline definitions require policies. Required-failure
+  exclusions remain disabled until their durable policy and record format exist.
 
 ## Repeatable checks
 
@@ -76,29 +75,12 @@ flyb lint names --config doc/design-meta
 flyb lint orphans --config doc/design-meta --subject-label example
 flyb generate markdown --config doc/design-meta
 python3 scripts/check-design-examples.py
+clang -x c -std=c11 -Wall -Wextra -Werror -fsyntax-only doc/design-meta/examples/api/selenetide.h
 ```
 
-For Swift verification, keep the compiler cache and executable in the ignored scratch paths:
-
-```sh
-swiftc -swift-version 6 \
-  -module-cache-path scratch/design-review/swift-module-cache \
-  doc/design-meta/examples/processing/email-transformer.swift \
-  doc/design-meta/examples/storage/duckdb-exporter.swift \
-  scratch/design-review/SwiftContractProbe.swift \
-  -o scratch/design-review/swift-contract-probe
-scratch/design-review/swift-contract-probe
-```
-
-For TypeScript, run an installed compiler without fetching dependencies:
-
-```sh
-tsc --noEmit --strict --target es2022 --module commonjs \
-  doc/design-meta/examples/sync/sync-api.ts \
-  doc/design-meta/examples/content/fetch-email-api.ts \
-  doc/design-meta/examples/processing/email-processing-pipeline-api.ts \
-  doc/design-meta/examples/query/query-api.ts \
-  doc/design-meta/examples/architecture/library-processing-flows.ts
-```
-
-This review used an existing locally installed TypeScript compiler and did not add dependencies to SeleneTide.
+The structural checker validates source coverage, CSV widths and IDs, feature
+references, planned-test references, entity inverses, stage dependencies, query
+columns and examples, the MIME fixture, generated links, and the overview budget.
+It does not execute SQLite, IMAP, JSON routing, or the C ABI. Rust sketches should
+be compiled with edition 2021 or later when a Rust toolchain is available; host
+adapter sketches should be checked with a strict ES2022 TypeScript compiler.

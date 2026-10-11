@@ -1,8 +1,8 @@
 column_id,column_name,schema_placement,parquet_type,duckdb_type,nullable,category,source_information,description,notes
 schema.version,schema_version,core_column,INT32,INTEGER,no,Schema,Local,Schema version used to decode and migrate the row,Start at 1 and increment only for incompatible evolution
 extensions.values,extensions,core_column,"MAP<STRING (UTF8), STRING (UTF8)>",JSON,no,Schema,Local,Stable envelope for provider-specific customer-specific and evolving metadata,Use an empty object or map when absent; keys are extension_key column_name values and values use canonical JSON encoding
-identity.account_id,account_id,core_column,STRING (UTF8),VARCHAR,no,Identity,Local,Stable Core Data account UUID,Part of both the mailbox-location key and provider correlation keys
-identity.mailbox_id,mailbox_id,core_column,STRING (UTF8),VARCHAR,no,Identity,Local,Stable Core Data mailbox UUID,"The mailbox-location key is account_id, mailbox_id, uid_validity, and uid"
+identity.account_id,account_id,core_column,STRING (UTF8),VARCHAR,no,Identity,Local,Stable SQLite account UUID,Part of both the mailbox-location key and provider correlation keys
+identity.mailbox_id,mailbox_id,core_column,STRING (UTF8),VARCHAR,no,Identity,Local,Stable SQLite mailbox UUID,"The mailbox-location key is account_id, mailbox_id, uid_validity, and uid"
 identity.mailbox_name,mailbox_name,core_column,STRING (UTF8),VARCHAR,no,Identity,Local,IMAP mailbox name captured when the row is written,Useful when files are inspected without the model store
 identity.uid_validity,uid_validity,core_column,INT64,BIGINT,no,Identity,UIDVALIDITY,IMAP UIDVALIDITY for the containing mailbox,Part of the durable message identity
 identity.uid,uid,core_column,INT64,BIGINT,no,Identity,UID,Mailbox-local stable IMAP UID,Sequence number is intentionally excluded because it is transient
@@ -77,6 +77,6 @@ derived.replied_status,is_replied,core_column,BOOLEAN,BOOLEAN,no,Derived,Derived
 derived.flagged_status,is_flagged,core_column,BOOLEAN,BOOLEAN,no,Derived,FLAGS,Whether FLAGS contains Flagged,Useful for measuring user-marked importance
 derived.bulk_signal,bulk_classification,core_column,STRING (UTF8),VARCHAR,yes,Derived,Derived mailing-list/bulk signal,Documented classification from list and automation headers,Use a versioned deterministic classifier
 derived.bulk_signal_version,bulk_classification_version,core_column,INT32,INTEGER,yes,Derived,Local,Version of the bulk-classification rule,Required whenever bulk_classification is populated
-capture.source_version,source_version,core_column,INT64,BIGINT,no,Capture,Core Data MetadataExportState,Globally allocated immutable input snapshot revision,Allocate from AnalyticalRevisionSequence; preserve on replay and increase for new input or a correction.
+capture.source_version,source_version,core_column,INT64,BIGINT,no,Capture,SQLite MetadataExportState,Globally allocated immutable input snapshot revision,Allocate from AnalyticalRevisionSequence; preserve on replay and increase for new input or a correction.
 identity.email_date,email_date,core_column,"TIMESTAMP(MICROS, isAdjustedToUTC=true)",TIMESTAMPTZ,no,Partition,INTERNALDATE + Date + first metadata_fetched_at,Canonical UTC email date fixed on first successful capture,Choose INTERNALDATE then unambiguous sent_at then first metadata_fetched_at; preserve for the durable mailbox message identity.
 identity.email_date_source,email_date_source,core_column,STRING (UTF8),VARCHAR,no,Partition,Local,Provenance of the fixed canonical UTC date,internal_date sent_at or first_metadata_fetched_at

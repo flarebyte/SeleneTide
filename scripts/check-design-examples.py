@@ -134,14 +134,14 @@ def main():
         require(len(related) == len(set(related)) and set(related) <= spec_notes,
                 f"Invalid specification references: {row['test_id']}")
 
-    workflow_fields = tables["coredata_workflow_fields.csv"]
-    pipeline_fields = tables["coredata_email_pipeline_fields.csv"]
+    workflow_fields = tables["sqlite_workflow_fields.csv"]
+    pipeline_fields = tables["sqlite_email_pipeline_fields.csv"]
     fields = {(row["entity"], row["field"]): row for row in workflow_fields + pipeline_fields}
     require(len(fields) == len(workflow_fields) + len(pipeline_fields), "Duplicate entity fields")
     for row in fields.values():
         inverse = re.search(r"inverse=(\w+)", row["relationship"])
         if inverse:
-            target = row.get("swift_type", row.get("core_data_type"))
+            target = row["logical_type"]
             target = re.sub(r"^To-(?:one|many) ", "", target).strip("[]")
             require((target, inverse.group(1)) in fields,
                     f"Unknown inverse: {row['entity']}.{row['field']}")

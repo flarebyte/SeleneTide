@@ -1,20 +1,20 @@
-# SeleneTide Swift Library Specification
+# SeleneTide Rust Library Specification
 
 Requirements, architecture, persistence, and API contracts assembled from doc/design-meta/examples.
 
 ## 01 Overview
 
-Purpose, Swift API conventions, and the relationship between the source artifacts.
+Purpose, Rust and C ABI conventions, and the relationship between the source artifacts.
 
 ### 01 Library Scope
 
-#### Scope and Swift API Conventions
+#### Scope and Rust/C ABI Conventions
 
-SeleneTide is a Swift library for macOS and iOS that brings IMAP message metadata into durable local storage. A macOS CLI exposes account, sync, fetch, and export operations for interactive and headless use.
+SeleneTide is a portable Rust library that brings IMAP message metadata into durable local storage. A frontend backend retains a stateful session through a C ABI; CLI features are deferred.
 
-The specification covers account isolation and Keychain credentials; metadata-only synchronization; resumable period workflows; versioned per-email transformers; Core Data to DuckDB projection; monthly Parquet archival; constrained analytics; and explicitly requested temporary content.
+The specification covers account isolation and caller-supplied authentication; metadata-only synchronization; resumable period workflows; versioned per-email transformers; SQLite to DuckDB projection; monthly Parquet archival; constrained analytics; and explicitly requested temporary content.
 
-TypeScript files are language-neutral API sketches. The production Swift surface uses immutable Sendable values, async operations, AsyncSequence progress events, and cooperative cancellation. Swift examples define native transformer and exporter boundaries; they are design contracts rather than a complete library implementation.
+TypeScript files are language-neutral API sketches. The Rust core uses owned Send + Sync snapshots and session-owned workers. The public C ABI uses opaque session tokens and versioned UTF-8 JSON; host adapters map operation IDs and event polling to async conveniences. Rust examples define native transformer and exporter boundaries; they are design contracts rather than a complete library implementation.
 
 This document is generated from `doc/design-meta/app.cue` and every source example. Edit those sources and regenerate with `flyb validate --config doc/design-meta` followed by `flyb generate markdown --config doc/design-meta`.
 
@@ -24,7 +24,7 @@ The [consistency review](../design-meta/consistency-review.md) records resolved 
 
 #### Storage and Workflow Boundaries
 
-Core Data owns durable operational state, including plans, tasks, checkpoints, processing jobs, step results, and export claims. Keychain owns credentials. Each account has its own analytical files and DuckDB database; DuckDB is a replayable projection of operational results, while Parquet holds verified historical datasets.
+SQLite owns durable operational state, including plans, tasks, checkpoints, processing jobs, step results, and export claims. The caller supplies credentials, held only in session memory. Each account has its own analytical files and DuckDB database; DuckDB is a replayable projection of operational results, while Parquet holds verified historical datasets.
 
 A UTC period flows through planning, UID discovery, metadata fetch, per-email processing, DuckDB export and verification, then archive claim, write, publication, and finalization when eligible. Independent per-email work uses bounded concurrency. Archival normally applies to closed calendar months; open-period metadata remains queryable in DuckDB.
 
@@ -34,82 +34,239 @@ Queries resolve fixed logical datasets across live rows, queryable exporting sna
 
 The sections below preserve the detailed tables and API examples. Their rules and field definitions specify each subsystem's completion and recovery behavior.
 
+### 03 Stateful Session and Authentication
+
+JSON payload contracts and exactly-one mechanism examples. Source: [session-api.ts](../design-meta/examples/api/session-api.ts).
+
+#### Stateful Session and Authentication
+
+```ts
+/** JSON wire contracts for the stateful Rust library, ABI/payload version 1.
+ * These types describe payloads, not a TypeScript implementation.
+ * Promise/AsyncIterable sketches elsewhere are conveniences supplied by host adapters.
+ */
+export type Authentication = {
+  mechanisms:
+    | { PLAIN: { username: string; password: string } }
+    | { XOAUTH2: { username: string; accessToken: string } }
+    | { OAUTHBEARER: { username: string; accessToken: string } }
+    | { "SCRAM-SHA-256": { username: string; password: string } };
+};
+// Runtime validation enforces EXACTLY ONE key; TypeScript unions alone do not.
+export const passwordExample: Authentication = {
+  mechanisms: { "SCRAM-SHA-256": { username: "user@example.com", password: "<password>" } },
+};
+export const tokenExample: Authentication = {
+  mechanisms: { XOAUTH2: { username: "user@gmail.com", accessToken: "<access-token>" } },
+};
+
+export interface SessionConfiguration {
+  apiVersion: 1;
+  libraryRoot: string;
+  workerLimit: number; // positive bounded integer; applies to session-owned workers
+  busyTimeoutMs: number; // positive bounded integer
+  maxRequestBytes: number;
+  maxResponseBytes: number;
+  maxEventQueueSize: number;
+}
+export interface AccountConfiguration {
+  accountID: string;
+  displayName: string;
+  imapHost: string;
+  imapPort: number;
+  transportSecurity: "tls" | "starttls-required";
+}
+export type SessionRequest =
+  | { apiVersion: 1; method: "account.configure"; params: AccountConfiguration }
+  | { apiVersion: 1; method: "account.list"; params: Record<string, never> }
+  | { apiVersion: 1; method: "auth.set"; params: { accountID: string; authentication: Authentication } }
+  | { apiVersion: 1; method: "auth.clear"; params: { accountID: string } }
+  | { apiVersion: 1; method: "auth.status"; params: { accountID: string } }
+  | { apiVersion: 1; method: "operation.status" | "operation.cancel"; params: { operationID: string } }
+  | { apiVersion: 1; method: "operation.result"; params: { operationID: string; cursor?: string } }
+  | { apiVersion: 1; method: "events.poll"; params: { after?: string; limit: number } }
+  // Validate subsystem params against the sync, processing, query, or fetch sketches.
+  | { apiVersion: 1; method:
+      "sync.plan" | "sync.start" | "sync.resume" | "sync.status" | "sync.cancel" |
+      "processing.start" | "processing.resume" | "processing.status" | "processing.steps" | "processing.cancel" |
+      "query.validate" | "query.execute" | "content.fetch" | "content.status" |
+      "content.cancel" | "content.release" | "content.cleanup" | "export.start";
+      params: Record<string, unknown> };
+
+export type SessionResponse =
+  | { apiVersion: 1; ok: true; result: unknown }
+  | { apiVersion: 1; ok: false; error: { code: string; message: string; retryable: boolean } };
+// Starting long work returns {operationID}; its result is retrieved and paginated.
+// IDs, source revisions, event cursors and 64-bit integers use decimal strings
+// where JSON numbers would lose precision. UTC timestamps use RFC3339 strings.
+// auth.status returns only {accountID, mechanism, state}; never username/secret echoes.
+// state: authentication-required | credentials-ready | authenticating | authenticated.
+// auth.set validates and stores parameters; a successful set does not prove server login.
+```
+
+### 04 C ABI Contract
+
+Public handle and buffer ownership contract. Source: [selenetide.h](../design-meta/examples/api/selenetide.h).
+
+#### C ABI Contract
+
+```txt
+#ifndef SELENETIDE_H
+#define SELENETIDE_H
+#include <stddef.h>
+#include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Contract only: implementations will be exported from Rust cdylib/staticlib.
+ * Process-local opaque registry token: zero is invalid; tokens are never reused.
+ * A token contains no Rust pointer and is never persisted or sent across processes.
+ */
+typedef uint64_t selenetide_session;
+typedef struct selenetide_buffer {
+    uint8_t *data;
+    size_t len;
+} selenetide_buffer;
+
+enum selenetide_status {
+    SELENETIDE_OK = 0,
+    SELENETIDE_INVALID_ARGUMENT = 1,
+    SELENETIDE_INVALID_SESSION = 2,
+    SELENETIDE_REQUEST_FAILED = 3,
+    SELENETIDE_INTERNAL_ERROR = 4
+};
+
+uint32_t selenetide_abi_version(void); /* returns 1 */
+int32_t selenetide_session_open(const uint8_t *config_json, size_t config_len,
+                              selenetide_session *out_session,
+                              selenetide_buffer *out_json);
+int32_t selenetide_session_call(selenetide_session session,
+                              const uint8_t *request_json, size_t request_len,
+                              selenetide_buffer *out_json);
+int32_t selenetide_session_close(selenetide_session session,
+                               selenetide_buffer *out_json);
+void selenetide_buffer_free(selenetide_buffer buffer);
+
+/* Inputs are borrowed only for the call and copied before background work.
+ * Nonempty input needs a readable pointer; output pointers must be nonnull,
+ * writable, aligned and nonaliasing. Caller owns their storage. Invalid pointer
+ * provenance is a C caller contract violation, not a recoverable JSON error.
+ * Initialize output buffer to {NULL,0}, and open's session to 0 before fallible
+ * work. On success/failure JSON is returned when allocation permits; otherwise
+ * an empty buffer plus nonzero status. Payload: UTF-8 SessionResponse, no NUL.
+ * Each nonempty buffer is owned by Rust and freed exactly once with this API,
+ * including error buffers and buffers retained after session_close.
+ * Do not modify buffers or free them with a foreign allocator.
+ * {NULL,0} may be freed. No panic or exception may unwind across this boundary.
+ */
+#ifdef __cplusplus
+}
+#endif
+#endif
+```
+
+### 05 Session and Interop Rules
+
+Lifecycle, concurrency, authentication, ABI, and SQL mappings. Source: [session_rules.csv](../design-meta/examples/api/session_rules.csv).
+
+#### Session and Interop Rules
+
+| area | rationale | requirement | rule_id |
+| --- | --- | --- | --- |
+| Lifecycle | Provides a stateful backend with explicit resource ownership | The frontend backend opens a session and retains its handle across calls; the Rust session owns configuration runtime workers SQLite connections per-account DuckDB connections authentication and IMAP connections. | session.owner |
+| Lifecycle | Prevents partial initialization and concurrent independent writers | Validate configuration and transformer registry acquire exclusive portable root writer ownership open and migrate SQLite then lazily open per-account DuckDB; roll back partial initialization and return no handle on failure. | session.open |
+| Lifecycle | No workers may access freed session resources | Atomically reject new calls cancel and drain workers fence unfinished durable claims close IMAP and database connections clear secrets release process ownership and invalidate the handle; close waits for bounded network timeouts and cleanup. | session.close |
+| Concurrency | Rust values and connections do not cross the C boundary | Allow calls from multiple host threads through a synchronized handle registry; serialize configuration authentication mutation SQLite writes and per-account DuckDB writes while bounded workers run independent tasks. | session.concurrency |
+| Concurrency | Defines deterministic use after close and concurrent close behavior | Calls already admitted retain session ownership; close marks closing and waits for admitted calls and workers before disposal. Unknown closed or stale handles return session.invalid; a second close returns session.invalid. | session.close-race |
+| Authentication | The supplied four-mechanism catalogue describes alternatives rather than simultaneous credentials | auth.set accepts accountID and a mechanisms object with exactly one of PLAIN XOAUTH2 OAUTHBEARER SCRAM-SHA-256; require nonempty username and the corresponding password or accessToken and reject unknown fields nulls and multiple mechanisms. | auth.input |
+| Authentication | Mechanism selection has explicit failure semantics | Require verified TLS before sending credentials and verify server capability for the selected mechanism; never silently downgrade. SCRAM-SHA-256 must validate the server signature using a standards-compliant adapter. | auth.transport |
+| Authentication | Supports explicit token or password replacement across concurrent work | Keep credentials only in owned session memory per account; auth.set replaces them increments an in-memory auth generation and closes old IMAP connections. Late work using an old generation cannot restore authentication state or commit stale results. | auth.replace |
+| Authentication | No OS credential store or provider setup service is required | The host owns OAuth consent token acquisition refresh and secret persistence; expired or missing credentials produce authentication-required and network work blocks without consuming processing attempts until auth.set and explicit resume. | auth.host |
+| Authentication | Logout and recovery separate durable work from ephemeral authentication | auth.clear cancels and drains account network work clears credentials closes authenticated connections and leaves durable metadata intact. Close restart and process termination always require fresh credentials. | auth.clear |
+| Authentication | Host-owned input buffers remain the host responsibility | Do not persist secrets in SQLite DuckDB Parquet configuration task payloads logs tracing events exports or error details; avoid logging authentication request bytes and IMAP SASL exchanges and clear owned secret buffers on replacement and close where practical. | auth.redaction |
+| Interop | Separates stable C layout from evolving payload schemas | Expose ABI version 1 fixed-width status values an opaque process-local session token and pointer-length byte buffers; version JSON payloads independently and reject unsupported versions and unknown methods. | abi.version |
+| Interop | Defines allocator and lifetime ownership | All JSON uses validated UTF-8 length-delimited buffers; copy borrowed input before returning and free Rust-owned output exactly once with selenetide_buffer_free. Never expose Rust String Vec trait objects or references through C. | abi.memory |
+| Interop | Errors cannot unwind into foreign code | Return structured sanitized errors with stable codes and retryability; initialize outputs on every valid-pointer path and contain panics at every extern boundary. Allocation failure may return an empty buffer and status; a compromised session rejects further work until close. | abi.failure |
+| Interop | Keeps foreign calls independent of a host async runtime | Long sync fetch processing query and export calls return operation IDs immediately; status result and cancel methods operate within the owning session. Cancellation is cooperative; durable domain run IDs remain resumable after reopen while session operation IDs expire. | abi.operations |
+| Interop | Bounds memory and makes lost progress explicit | events.poll is nonblocking and returns bounded ordered events and a next cursor; queue overflow or an old cursor returns events.gap with a snapshot refresh requirement; events and result pages obey configured byte limits. | abi.events |
+| Interop | Avoids requiring frontend callbacks or generic types in the C ABI | Map subsystem Promise operations to JSON requests and operation IDs and AsyncIterable events to polling; the TypeScript files are host-adapter sketches rather than native C signatures. Transformer registration remains Rust-internal in v1. | abi.mapping |
+| Bindings | A frontend may choose direct C integration without UniFFI | UniFFI is optional for generated target-language records enums objects and async conveniences over the same Rust session model; its generated scaffolding is distinct from the public C ABI and must be version-pinned with its bindings. | abi.uniffi |
+| Persistence | Replaces managed object storage with explicit relational mappings | Field tables describe logical entities. Map IDs to canonical UUID TEXT booleans to checked INTEGER 0 or 1 dates to INTEGER UTC Unix milliseconds JSON to TEXT and bytes to BLOB; collections use foreign keys or join tables with declared uniqueness and delete rules. | sqlite.schema |
+
 ## 02 Product Requirements
 
 Library scope, platform requirements, and practical uses.
 
 ### 01 Feature Requirements
 
-Required, recommended, and optional capabilities for the Swift library and macOS CLI. Source: [features.csv](../design-meta/examples/requirements/features.csv).
+Required, recommended, and optional capabilities for the portable Rust library. Source: [features.csv](../design-meta/examples/requirements/features.csv).
 
 #### Feature Requirements
 
 | area | capability | feature_id | platform | priority | requirement |
 | --- | --- | --- | --- | --- | --- |
-| Accounts | Multiple accounts | account.multiple | macOS+iOS | must | Keep each account's analytical files and temporary artifacts in its own stable subfolder, such as account1 or account3; isolate shared Core Data rows by accountID. |
-| Accounts | Account settings | account.settings | macOS+iOS | must | Persist non-secret per-account configuration in the application-local Core Data store; UserDefaults is not an account data store. |
-| Accounts | Credential storage | account.secrets | macOS+iOS | must | Store passwords, OAuth tokens, and other account secrets in Keychain; never write secrets to account files, logs, or exports. |
-| Accounts | Global preferences | settings.global | macOS+iOS | should | Do not introduce UserDefaults until a truly global, non-sensitive, device-local preference is identified; if needed, keep it outside account and workflow state. |
-| Authentication | Headless Keychain access | auth.keychain-headless | macOS | must | Configure Keychain access groups and item accessibility so an authorized signed macOS CLI, launchd service, or non-interactive SSH session can read credentials without an unexpected GUI prompt; fail deterministically when the Keychain is unavailable or locked. |
-| Authentication | IMAP credentials | auth.imap-password | macOS+iOS | should | Support standards-based IMAP authentication for servers that permit username and password credentials. |
-| Authentication | OAuth 2.0 | auth.oauth2 | macOS+iOS | must | Support OAuth 2.0 authorization and token refresh for IMAP providers that require it. |
-| Authentication | Gmail | auth.gmail | macOS+iOS | must | Provide a Gmail account setup flow using Google's supported OAuth scopes and IMAP authentication mechanism. |
-| Authentication | Provider extensibility | auth.provider-extensibility | macOS+iOS | should | Keep provider-specific authorization separate from the generic IMAP client so additional major providers can be added. |
-| IMAP | Mailbox status | imap.status | macOS+iOS | should | Read mailbox message count and aggregate size information when exposed by the server. |
-| IMAP | Message discovery | imap.search | macOS+iOS | must | Search a mailbox by date range and return stable message UIDs, not sequence numbers, for sync planning. |
-| IMAP | Header fetch | imap.headers | macOS+iOS | must | Fetch selected RFC message headers, flags, internal date, size, UID, and provider metadata without downloading message bodies. |
-| IMAP | MIME structure | imap.bodystructure | macOS+iOS | must | Fetch BODYSTRUCTURE independently of message content so callers can inspect available body parts and attachments. |
-| IMAP | UID fetch | imap.fetch-uid | macOS+iOS | must | Fetch an individual message or MIME part by mailbox and UID. |
-| IMAP | Sequence-number fetch | imap.fetch-sequence | macOS+iOS | could | Allow sequence-number fetches for immediate low-level operations but do not use sequence numbers as durable identifiers. |
-| IMAP | Gmail cross-label identity | imap.gmail-identity | macOS+iOS | must | Keep account mailbox UIDVALIDITY and UID as the fetch identity, and use account plus X-GM-MSGID as a separate correlation key for the same Gmail message exposed under multiple labels. |
-| Sync | Initial metadata sync | sync.initial | macOS+iOS | must | Discover and download headers and metadata without downloading full message bodies. |
-| Sync | Incremental refresh | sync.refresh | macOS+iOS | must | Refresh local metadata for new, changed, moved, and expunged messages while minimizing network traffic. |
-| Sync | Durable sync cursor | sync.cursor | macOS+iOS | must | Record per-account and per-mailbox checkpoints, including UIDVALIDITY and the highest observed UID or equivalent capability-specific state. |
-| Sync | Mailbox reconciliation | sync.reconcile | macOS+iOS | must | Invalidate or reconcile local state safely when server identity or UIDVALIDITY changes. |
-| Sync | Interruption recovery | sync.interruption | macOS+iOS | must | Resume an interrupted sync without silently skipping work or unnecessarily repeating completed downloads. |
-| Workflow | Offline workflow store | workflow.database | macOS+iOS | must | Use one offline Core Data SQLite persistent store for accounts sync plans tasks attempts dependencies checkpoints and progress. |
-| Workflow | Task lifecycle | workflow.lifecycle | macOS+iOS | must | Track pending, running, blocked, completed, failed, and cancelled task states. |
-| Workflow | Retry policy | workflow.retry | macOS+iOS | must | Record retryable failures and schedule bounded retries with backoff while preserving the underlying error. |
-| Workflow | Task audit trail | workflow.audit | macOS+iOS | should | Retain task attempts status transitions timestamps and diagnostic summaries for troubleshooting. |
-| Workflow | Progress reporting | workflow.progress | macOS+iOS | should | Expose account mailbox and overall sync progress to library clients and the CLI. |
-| Workflow | Period orchestration | workflow.period | macOS+iOS | must | Coordinate UID discovery metadata fetch per-email transformation DuckDB projection and Parquet archival for a UTC period, normally one calendar month. |
-| Workflow | Durable per-email fan-out | workflow.fanout | macOS+iOS | must | Create idempotent persisted fetch and processing tasks for every discovered mailbox UID and run independent email work with bounded parallelism. |
-| Workflow | Stage completion gates | workflow.stage-gates | macOS+iOS | must | Start period export only after all required per-email processing is terminal and start Parquet archival only after DuckDB projection is complete and verified. |
-| Storage | Account layout | storage.account-layout | macOS+iOS | must | Place DuckDB Parquet exports intermediate files and temporary content beneath the owning account subfolder; account and workflow rows live in one shared application-local Core Data store with logical account isolation. |
-| Storage | Parquet metadata | storage.parquet | macOS+iOS | must | Store normalized message headers and metadata in Parquet with one logical file per account, mailbox, and calendar month. |
-| Storage | DuckDB hot store | storage.duckdb-hot | macOS+iOS | must | Keep recent unarchived headers and metadata in a mutable DuckDB database beneath each account folder, normally covering the open UTC calendar month, so frequent refreshes and queries do not rewrite Parquet. |
-| Storage | Monthly archive | storage.monthly-archive | macOS+iOS | must | After a full UTC calendar month closes, transactionally move its live rows into durable queryable exporting snapshots; delete exporting rows only after verified atomic Parquet publication and manifest commit. |
-| Storage | Archived-month corrections | storage.archive-overlay | macOS+iOS | must | Record changes and tombstones for already archived messages in a DuckDB overlay, merge that overlay when querying, and compact affected Parquet partitions atomically according to policy. |
-| Storage | Monthly partitioning | storage.partition-key | macOS+iOS | must | Choose canonical email_date once per mailbox message identity from UTC INTERNALDATE, then an unambiguous Date header, then the first metadata_fetched_at; retain that timestamp and its YYYY-MM partition across refreshes. |
-| Storage | Atomic publication | storage.atomicity | macOS+iOS | must | Write or replace Parquet partitions atomically so interruption cannot expose a partially written file. |
-| Storage | Schema evolution | storage.schema | macOS+iOS | must | Version the metadata schema, preserve compatibility or provide an explicit migration path, and keep core columns identical between DuckDB and Parquet. |
-| Storage | Core and extension fields | storage.schema-placement | macOS+iOS | must | Represent stable shared and frequently queried fields as core columns that always exist, while provider-specific customer-specific and evolving values use a stable extensions envelope: JSON in DuckDB and MAP<STRING, STRING> with canonical JSON values in Parquet. |
-| Storage | Embedded Parquet engine | storage.parquet-engine | macOS+iOS | must | Embed a Parquet-capable native engine, expected to be DuckDB, and keep its C++ bridge or other FFI free of unsupported dynamic dependencies; compile and link it in CI for macOS and iOS arm64 device and simulator targets. |
-| On-demand content | Message fetch | content.fetch | macOS+iOS | must | Download a complete message by account mailbox and UID only when explicitly requested. |
-| On-demand content | Selective MIME fetch | content.parts | macOS+iOS | should | Download selected text HTML or attachment MIME parts without requiring the complete message when the server supports it. |
-| On-demand content | Content extraction | content.transform | macOS+iOS | should | Extract text HTML and attachment metadata from downloaded MIME content. |
-| On-demand content | HTML to Markdown | content.markdown | macOS+iOS | could | Optionally convert an HTML body to Markdown for downstream processing. |
-| On-demand content | Temporary retention | content.temporary | macOS+iOS | must | Treat downloaded bodies and attachments as disposable cached artifacts that can be removed after use or by a cleanup policy. |
-| Processing | Durable transformation pipeline | processing.pipeline | macOS+iOS | must | Process each email through a versioned code-defined dependency graph and persist every instantiated step state and output in Core Data. |
-| Processing | Crash recovery | processing.resume | macOS+iOS | must | Resume incomplete email processing after termination without rerunning still-valid completed steps. |
-| Processing | Bounded parallelism | processing.parallel | macOS+iOS | must | Run independent ready transformations concurrently with bounded limits for local CPU I/O and network work. |
-| Processing | Result reuse | processing.reuse | macOS+iOS | must | Reuse successful persisted results only when email identity step version input fingerprint and output schema remain compatible. |
-| Processing | Transformer registry | processing.transformers | macOS+iOS | must | Require uniquely named strongly typed Swift transformers, inject the complete registry at library initialization, and persist each exact transformer name for crash recovery. |
-| Processing | DuckDB analytical projection | processing.duckdb-export | macOS+iOS | must | Export stable terminal processing results from authoritative Core Data into DuckDB using versioned idempotent transactional upserts. |
-| Processing | Durable export checkpoint | processing.export-checkpoint | macOS+iOS | must | Track each result source version export state attempts lease exported version and exported timestamp in Core Data. |
-| Processing | Dual-store recovery | processing.export-recovery | macOS+iOS | must | Replay an expired Core Data export claim safely when DuckDB may have committed before Core Data acknowledged it. |
-| Export | CSV export | export.csv | macOS+iOS | must | Export a selected metadata scope or date range to CSV without requiring full message downloads. |
-| Export | JSON export | export.json | macOS+iOS | must | Export a selected metadata scope or date range to JSON without requiring full message downloads. |
-| Library API | Swift concurrency | library.async | macOS+iOS | must | Expose cancellable asynchronous operations compatible with Swift concurrency. |
-| Library API | Structured events | library.observability | macOS+iOS | should | Expose structured progress warnings and errors without leaking message content or credentials. |
-| CLI | Account commands | cli.accounts | macOS | must | Provide commands to configure list inspect and remove account configurations. |
-| CLI | Sync commands | cli.sync | macOS | must | Provide commands to plan start resume inspect and refresh metadata synchronization. |
-| CLI | Fetch commands | cli.fetch | macOS | must | Provide commands to fetch selected messages or MIME parts on demand and clean up temporary content. |
-| CLI | Export commands | cli.export | macOS | must | Provide commands to export metadata to CSV or JSON. |
-| CLI | Automation contract | cli.automation | macOS | should | Support deterministic machine-readable output, meaningful exit statuses, and non-interactive operation. |
-| Query API | Constrained analytics DSL | query.constrained | macOS+iOS | must | Accept JSON query structure and a small literal-free expression language, validate against an allow-list, and compile only parameterized DuckDB SQL. |
-| Query API | Logical analytical datasets | query.logical-datasets | macOS+iOS | must | Query fixed logical email and processing-result datasets combining DuckDB live rows queryable exporting snapshots Parquet archives and correction overlays with version deduplication and tombstones. |
-| Query API | Counts and statistics | query.aggregates | macOS+iOS | must | Support first-class count and allow-listed statistics including min max avg stddev median quantile and approximate distinct. |
+| Accounts | Multiple accounts | account.multiple | cross-platform | must | Keep each account's analytical files and temporary artifacts in its own stable subfolder, such as account1 or account3; isolate shared SQLite rows by accountID. |
+| Accounts | Account settings | account.settings | cross-platform | must | Persist non-secret per-account configuration in SQLite; accept global configuration as explicit session-open parameters. |
+| Accounts | Caller-supplied credentials | account.secrets | cross-platform | must | Accept username and password or accessToken as parameters; keep authentication material only in session memory and never persist or echo it. |
+| Accounts | Session configuration | settings.global | cross-platform | should | Pass global configuration explicitly when opening the session; do not depend on OS preference services. |
+| Authentication | Password mechanisms | auth.imap-password | cross-platform | must | Support PLAIN and SCRAM-SHA-256 using caller-supplied username and password; require verified TLS and reject unsupported server mechanisms without downgrade. |
+| Authentication | Token mechanisms | auth.oauth2 | cross-platform | must | Support XOAUTH2 and OAUTHBEARER using caller-supplied username and accessToken; the host obtains and refreshes tokens then replaces session authentication. |
+| Authentication | Gmail authentication | auth.gmail | cross-platform | must | Accept caller-supplied Gmail username and accessToken for XOAUTH2; OAuth consent and token refresh belong to the host. |
+| Authentication | Provider extensibility | auth.provider-extensibility | cross-platform | should | Keep provider-specific authorization separate from the generic IMAP client so additional major providers can be added. |
+| IMAP | Mailbox status | imap.status | cross-platform | should | Read mailbox message count and aggregate size information when exposed by the server. |
+| IMAP | Message discovery | imap.search | cross-platform | must | Search a mailbox by date range and return stable message UIDs, not sequence numbers, for sync planning. |
+| IMAP | Header fetch | imap.headers | cross-platform | must | Fetch selected RFC message headers, flags, internal date, size, UID, and provider metadata without downloading message bodies. |
+| IMAP | MIME structure | imap.bodystructure | cross-platform | must | Fetch BODYSTRUCTURE independently of message content so callers can inspect available body parts and attachments. |
+| IMAP | UID fetch | imap.fetch-uid | cross-platform | must | Fetch an individual message or MIME part by mailbox and UID. |
+| IMAP | Sequence-number fetch | imap.fetch-sequence | cross-platform | could | Allow sequence-number fetches for immediate low-level operations but do not use sequence numbers as durable identifiers. |
+| IMAP | Gmail cross-label identity | imap.gmail-identity | cross-platform | must | Keep account mailbox UIDVALIDITY and UID as the fetch identity, and use account plus X-GM-MSGID as a separate correlation key for the same Gmail message exposed under multiple labels. |
+| Sync | Initial metadata sync | sync.initial | cross-platform | must | Discover and download headers and metadata without downloading full message bodies. |
+| Sync | Incremental refresh | sync.refresh | cross-platform | must | Refresh local metadata for new, changed, moved, and expunged messages while minimizing network traffic. |
+| Sync | Durable sync cursor | sync.cursor | cross-platform | must | Record per-account and per-mailbox checkpoints, including UIDVALIDITY and the highest observed UID or equivalent capability-specific state. |
+| Sync | Mailbox reconciliation | sync.reconcile | cross-platform | must | Invalidate or reconcile local state safely when server identity or UIDVALIDITY changes. |
+| Sync | Interruption recovery | sync.interruption | cross-platform | must | Resume an interrupted sync without silently skipping work or unnecessarily repeating completed downloads. |
+| Workflow | Offline workflow store | workflow.database | cross-platform | must | Use one offline SQLite persistent store for accounts sync plans tasks attempts dependencies checkpoints and progress. |
+| Workflow | Task lifecycle | workflow.lifecycle | cross-platform | must | Track pending, running, blocked, completed, failed, and cancelled task states. |
+| Workflow | Retry policy | workflow.retry | cross-platform | must | Record retryable failures and schedule bounded retries with backoff while preserving the underlying error. |
+| Workflow | Task audit trail | workflow.audit | cross-platform | should | Retain task attempts status transitions timestamps and diagnostic summaries for troubleshooting. |
+| Workflow | Progress reporting | workflow.progress | cross-platform | should | Expose account mailbox and overall sync progress to session clients. |
+| Workflow | Period orchestration | workflow.period | cross-platform | must | Coordinate UID discovery metadata fetch per-email transformation DuckDB projection and Parquet archival for a UTC period, normally one calendar month. |
+| Workflow | Durable per-email fan-out | workflow.fanout | cross-platform | must | Create idempotent persisted fetch and processing tasks for every discovered mailbox UID and run independent email work with bounded parallelism. |
+| Workflow | Stage completion gates | workflow.stage-gates | cross-platform | must | Start period export only after all required per-email processing is terminal and start Parquet archival only after DuckDB projection is complete and verified. |
+| Storage | Account layout | storage.account-layout | cross-platform | must | Place DuckDB Parquet exports intermediate files and temporary content beneath the owning account subfolder; account and workflow rows live in one shared application-local SQLite store with logical account isolation. |
+| Storage | Parquet metadata | storage.parquet | cross-platform | must | Store normalized message headers and metadata in Parquet with one logical file per account, mailbox, and calendar month. |
+| Storage | DuckDB hot store | storage.duckdb-hot | cross-platform | must | Keep recent unarchived headers and metadata in a mutable DuckDB database beneath each account folder, normally covering the open UTC calendar month, so frequent refreshes and queries do not rewrite Parquet. |
+| Storage | Monthly archive | storage.monthly-archive | cross-platform | must | After a full UTC calendar month closes, transactionally move its live rows into durable queryable exporting snapshots; delete exporting rows only after verified atomic Parquet publication and manifest commit. |
+| Storage | Archived-month corrections | storage.archive-overlay | cross-platform | must | Record changes and tombstones for already archived messages in a DuckDB overlay, merge that overlay when querying, and compact affected Parquet partitions atomically according to policy. |
+| Storage | Monthly partitioning | storage.partition-key | cross-platform | must | Choose canonical email_date once per mailbox message identity from UTC INTERNALDATE, then an unambiguous Date header, then the first metadata_fetched_at; retain that timestamp and its YYYY-MM partition across refreshes. |
+| Storage | Atomic publication | storage.atomicity | cross-platform | must | Write or replace Parquet partitions atomically so interruption cannot expose a partially written file. |
+| Storage | Schema evolution | storage.schema | cross-platform | must | Version the metadata schema, preserve compatibility or provide an explicit migration path, and keep core columns identical between DuckDB and Parquet. |
+| Storage | Core and extension fields | storage.schema-placement | cross-platform | must | Represent stable shared and frequently queried fields as core columns that always exist, while provider-specific customer-specific and evolving values use a stable extensions envelope: JSON in DuckDB and MAP<STRING, STRING> with canonical JSON values in Parquet. |
+| Storage | Embedded Parquet engine | storage.parquet-engine | cross-platform | must | Embed DuckDB through a portable Rust adapter and verify linking on the selected Linux Windows and macOS targets without required Apple services. |
+| On-demand content | Message fetch | content.fetch | cross-platform | must | Download a complete message by account mailbox and UID only when explicitly requested. |
+| On-demand content | Selective MIME fetch | content.parts | cross-platform | should | Download selected text HTML or attachment MIME parts without requiring the complete message when the server supports it. |
+| On-demand content | Content extraction | content.transform | cross-platform | should | Extract text HTML and attachment metadata from downloaded MIME content. |
+| On-demand content | HTML to Markdown | content.markdown | cross-platform | could | Optionally convert an HTML body to Markdown for downstream processing. |
+| On-demand content | Temporary retention | content.temporary | cross-platform | must | Treat downloaded bodies and attachments as disposable cached artifacts that can be removed after use or by a cleanup policy. |
+| Processing | Durable transformation pipeline | processing.pipeline | cross-platform | must | Process each email through a versioned code-defined dependency graph and persist every instantiated step state and output in SQLite. |
+| Processing | Crash recovery | processing.resume | cross-platform | must | Resume incomplete email processing after termination without rerunning still-valid completed steps. |
+| Processing | Bounded parallelism | processing.parallel | cross-platform | must | Run independent ready transformations concurrently with bounded limits for local CPU I/O and network work. |
+| Processing | Result reuse | processing.reuse | cross-platform | must | Reuse successful persisted results only when email identity step version input fingerprint and output schema remain compatible. |
+| Processing | Transformer registry | processing.transformers | cross-platform | must | Require uniquely named strongly typed Rust transformers, inject the complete registry at library initialization, and persist each exact transformer name for crash recovery. |
+| Processing | DuckDB analytical projection | processing.duckdb-export | cross-platform | must | Export stable terminal processing results from authoritative SQLite into DuckDB using versioned idempotent transactional upserts. |
+| Processing | Durable export checkpoint | processing.export-checkpoint | cross-platform | must | Track each result source version export state attempts lease exported version and exported timestamp in SQLite. |
+| Processing | Dual-store recovery | processing.export-recovery | cross-platform | must | Replay an expired SQLite export claim safely when DuckDB may have committed before SQLite acknowledged it. |
+| Export | CSV export | export.csv | cross-platform | must | Export a selected metadata scope or date range to CSV without requiring full message downloads. |
+| Export | JSON export | export.json | cross-platform | must | Export a selected metadata scope or date range to JSON without requiring full message downloads. |
+| Library API | Stateful C ABI | library.async | cross-platform | must | Expose versioned C functions with session handles and UTF-8 JSON requests and responses; long operations return operation IDs for polling and cancellation. |
+| Library API | Structured events | library.observability | cross-platform | should | Expose structured progress warnings and errors without leaking message content or credentials. |
+| Query API | Constrained analytics DSL | query.constrained | cross-platform | must | Accept JSON query structure and a small literal-free expression language, validate against an allow-list, and compile only parameterized DuckDB SQL. |
+| Query API | Logical analytical datasets | query.logical-datasets | cross-platform | must | Query fixed logical email and processing-result datasets combining DuckDB live rows queryable exporting snapshots Parquet archives and correction overlays with version deduplication and tombstones. |
+| Query API | Counts and statistics | query.aggregates | cross-platform | must | Support first-class count and allow-listed statistics including min max avg stddev median quantile and approximate distinct. |
+| Library API | Session ownership | library.session | cross-platform | must | Maintain runtime workers database connections configuration account-scoped authentication and IMAP connections until explicit close; reopening requires fresh authentication. |
+| Library API | Portable Rust core | library.portable | cross-platform | must | Implement the core in Rust without required macOS services; a frontend backend owns the session and may adapt it for future CLI clients. CLI features are deferred. |
+| Library API | Optional UniFFI bindings | library.bindings | cross-platform | should | Optional UniFFI records enums and objects adapt the Rust session model; keep the explicit C ABI independent of generated UniFFI scaffolding. |
 
 ### 02 Practical Use Cases
 
@@ -119,40 +276,39 @@ User goals, inputs, outputs, and acceptance criteria. Source: [practical_use_cas
 
 | actor | expected_result | input | library_capabilities | platform | priority | related_feature_ids | scenario | trigger | use_case_id |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| App user | The account is securely configured and ready to sync | Email address, OAuth consent | Gmail OAuth setup and Keychain token storage | macOS+iOS | must | auth.gmail;auth.oauth2;account.secrets | Connect a Gmail mailbox for metadata analysis | The user adds a Gmail account | account.add-gmail |
-| App user | The account is validated and ready to sync | Host, port, transport security, username, credentials | Generic IMAP configuration and secure credential storage | macOS+iOS | should | auth.imap-password;auth.provider-extensibility;account.settings | Connect a standards-based IMAP account | The user adds a non-Gmail provider | account.add-imap |
-| App user | Operations and queries remain scoped to the selected accounts | Account identifiers and settings | Per-account configuration folders and isolated analytical stores | macOS+iOS | must | account.multiple;storage.account-layout | Work with several independent mail accounts | The user switches or compares accounts | account.manage-many |
-| Operator | The job authenticates without unexpected GUI prompts or fails clearly | Configured account and unlocked authorized Keychain | Headless Keychain access and non-interactive CLI behavior | macOS | should | auth.keychain-headless;cli.automation | Run scheduled mailbox processing without an interactive session | launchd or SSH starts the CLI | account.headless |
-| App user | The month becomes queryable in DuckDB and later archived to Parquet | Account, mailbox, YYYY-MM | Period planning UID discovery metadata fetch transformation and export | macOS+iOS | must | workflow.period;workflow.fanout;sync.initial | Ingest one calendar month of mailbox metadata | A month is selected | sync.month |
-| Researcher | All matching metadata is processed without downloading bodies | Account, mailboxes, UTC start and end | Paged UID discovery and bounded per-email fan-out | macOS+iOS | must | imap.search;imap.headers;workflow.fanout | Backfill a historical date range | The user requests older mail | sync.historical-range |
-| App user | New changed moved and expunged messages are reflected locally | Existing mailbox checkpoint | Incremental discovery reconciliation and idempotent upserts | macOS+iOS | must | sync.refresh;sync.cursor;sync.reconcile | Refresh recent metadata after new mail or flag changes | The app or scheduler starts an incremental refresh | sync.refresh |
-| App user | Processing resumes without repeating valid completed work | Persisted workflow and processing state | Expired-lease recovery dependency scheduling and result reuse | macOS+iOS | must | sync.interruption;processing.resume;processing.reuse | Continue work after force-quit crash or device restart | The library initializes with unfinished tasks | sync.resume |
-| App or CLI user | The caller can display progress and diagnose blocked work | Run identifier | Structured events counters stages warnings and failures | macOS+iOS | should | workflow.progress;library.observability | Observe a long-running sync and processing run | A period workflow is active | sync.monitor |
-| App user | The workflow pauses and resumes without losing its checkpoint | Failure classification and retry-after data | Persisted bounded backoff and retry scheduling | macOS+iOS | must | workflow.retry;workflow.lifecycle | Recover from provider rate limiting or temporary network loss | IMAP returns a transient failure | sync.rate-limit |
-| Analyst | Label copies can be joined without corrupting fetch identity | Account, mailbox identities, X-GM-MSGID | Mailbox-location keys plus account-wide Gmail correlation | macOS+iOS | must | imap.gmail-identity | Correlate one Gmail message exposed through several labels | Gmail returns the same X-GM-MSGID with different UIDs | gmail.labels |
-| Library integrator | The transformer participates in durable per-email processing | A uniquely named Swift transformer | Typed transformer registration versioning retries and persisted output | macOS+iOS | must | processing.transformers;processing.pipeline | Add a domain-specific email transformation | The application initializes the library | processing.custom-transformer |
-| Library integrator | Independent results complete faster while dependencies remain correct | Pipeline dependency graph and execution limits | Bounded local CPU I/O and network parallelism | macOS+iOS | must | processing.parallel | Run independent extraction and classification steps concurrently | A fetched message has several ready transformations | processing.parallel |
-| Library integrator | The step eventually succeeds or reaches a stable failed state | Persisted attempts and idempotency key | Bounded backoff with crash-safe replay | macOS+iOS | must | processing.pipeline;workflow.retry | Retry a transient transformer failure | A transformer returns retry or throws a classified transient error | processing.retry |
-| Library integrator | Required analytics remain available without hiding the optional failure | Requiredness and persisted failure result | Job completion with warnings and exportable failure metadata | macOS+iOS | should | processing.pipeline;processing.duckdb-export | Allow useful results when a nonessential transformer fails | An optional step exhausts retries | processing.optional |
-| Library integrator | The step is marked reused without repeating computation or network calls | Transformer name, version, input fingerprint, output schema | Persisted result compatibility checks and reuse link | macOS+iOS | must | processing.reuse | Reuse an expensive valid transformation in a later run | A matching message is processed again | processing.reuse |
-| Analyst | Titles, dates, domains, and mailboxes are returned | Domain, UTC start, UTC end | Constrained email_metadata query with bound variables | macOS+iOS | must | query.constrained;query.logical-datasets | List messages from a company during a date range | A user searches for correspondence | query.domain-period |
-| Analyst | A chronological monthly count is returned | Domain, year | Virtual year and month dimensions with grouped count | macOS+iOS | must | query.aggregates | Count messages from one company per month | A user requests a yearly trend | query.domain-monthly |
-| Analyst | Each year and sender domain has a message count | Optional account or period filters | Grouped counts over logical live and archived data | macOS+iOS | must | query.aggregates;query.logical-datasets | Compare sender-domain volumes by year | A user requests domain trends | query.domain-yearly |
-| Analyst | A ranked domain list is returned | Optional period and account filters | Grouped count ordered by generated count alias | macOS+iOS | must | query.constrained;query.aggregates | Find the most frequent sender domains | A user requests a sender overview | query.all-domains |
-| Analyst | Attachment frequency and size distributions can be reported | Optional domain mailbox or period filters | Count average median and quantile over attachment count and size columns | macOS+iOS | should | query.aggregates;imap.bodystructure | Measure attachment prevalence and storage impact | A user requests attachment statistics | query.attachment-stats |
-| Analyst | Large-message patterns can be compared safely | Domain, percentile | Bound parameterized quantile and grouped statistics | macOS+iOS | should | query.aggregates | Identify unusually large email sources | A user requests message-size statistics | query.message-size |
-| Analyst | The caller receives one current deduplicated result set | Constrained query request | Logical dataset merges DuckDB live and exporting snapshots Parquet archives and corrections | macOS+iOS | must | query.logical-datasets;storage.archive-overlay | Query recent and archived mail through one API | A query spans the current and earlier months | query.live-and-history |
-| App user | The body is available temporarily without entering the metadata archive | Account, mailbox, UIDVALIDITY, UID | On-demand raw message fetch and temporary lease | macOS+iOS | must | content.fetch;content.temporary | Temporarily inspect a complete email body | A user explicitly opens a message | content.read-message |
-| App user | Only requested attachments are atomically published for temporary use | Message identity and MIME part identifiers | Selective MIME fetch size limit progress and content lease | macOS+iOS | should | content.parts;content.temporary | Download selected attachments only | A user selects one or more attachments | content.fetch-attachment |
-| App or automation | A temporary Markdown artifact is returned | Message identity and body selection | On-demand HTML fetch extraction and Markdown conversion | macOS+iOS | could | content.transform;content.markdown | Convert an HTML email into Markdown | A caller requests a Markdown representation | content.to-markdown |
-| App or operator | Disposable content is removed without affecting metadata | Lease identifiers and cleanup policy | Explicit release expiry cleanup and abandoned-partial removal | macOS+iOS | must | content.temporary | Reclaim space used by downloaded bodies and attachments | A lease expires or cleanup is requested | content.cleanup |
-| CLI user | A deterministic CSV file is produced without downloading bodies | Query request and destination | Safe analytical query and CSV serializer | macOS | must | export.csv;cli.export;query.constrained | Export filtered metadata for spreadsheet analysis | A constrained query has been defined | export.csv |
-| Developer | A deterministic machine-readable JSON document is produced | Query request and destination | Safe analytical query and JSON serializer | macOS+iOS | must | export.json;query.constrained | Export filtered metadata for another local tool | A constrained query has been defined | export.json |
-| Operator | Monthly email and processing datasets are durably archived | Verified DuckDB period and schema versions | Immutable staging write verification atomic publish and manifest commit | macOS+iOS | must | storage.monthly-archive;storage.atomicity | Archive a closed month to Parquet | A full UTC calendar month closes or a complete historical month is selected | archive.month |
-| Operator | The archive completes without losing or duplicating rows | Persisted archive batch and manifest | DuckDB exporting snapshot retry and atomic publication | macOS+iOS | must | storage.atomicity;workflow.retry | Resume a failed Parquet publication | A write verification or process interruption occurs | archive.retry |
-| App user | Queries immediately show current state and Parquet is eventually corrected | Logical key source version and change or tombstone | DuckDB correction overlay merged queries and later compaction | macOS+iOS | must | storage.archive-overlay;sync.reconcile | Reflect a late flag label move or expunge in an old month | Incremental sync detects a change to archived metadata | archive.correct |
-| Operator | The month is synchronized processed projected verified and archived | Account, mailbox, month | Non-interactive CLI deterministic output exit status and resumable workflow | macOS | should | cli.sync;cli.automation;workflow.period | Run the complete monthly workflow from scripts or launchd | A scheduled command starts after month close | automation.monthly |
-| Operator | The responsible stage and actionable failure are visible | Run, task, job, or message identity | Queryable attempts state transitions errors timestamps and progress | macOS+iOS | should | workflow.audit;library.observability | Investigate why an email or period did not complete | A workflow is failed blocked or unexpectedly slow | diagnostics.audit |
+| App user | The account session authenticates without persisting the token | Account settings and caller-supplied username and accessToken | Session authentication using XOAUTH2 | cross-platform | must | auth.gmail;auth.oauth2;account.secrets | Connect a Gmail mailbox for metadata analysis | The user adds a Gmail account | account.add-gmail |
+| App user | The account is validated and ready to sync | Host, port, transport security, username, credentials | Generic IMAP configuration and caller-supplied session authentication | cross-platform | should | auth.imap-password;auth.provider-extensibility;account.settings | Connect a standards-based IMAP account | The user adds a non-Gmail provider | account.add-imap |
+| App user | Operations and queries remain scoped to the selected accounts | Account identifiers and settings | Per-account configuration folders and isolated analytical stores | cross-platform | must | account.multiple;storage.account-layout | Work with several independent mail accounts | The user switches or compares accounts | account.manage-many |
+| App user | The month becomes queryable in DuckDB and later archived to Parquet | Account, mailbox, YYYY-MM | Period planning UID discovery metadata fetch transformation and export | cross-platform | must | workflow.period;workflow.fanout;sync.initial | Ingest one calendar month of mailbox metadata | A month is selected | sync.month |
+| Researcher | All matching metadata is processed without downloading bodies | Account, mailboxes, UTC start and end | Paged UID discovery and bounded per-email fan-out | cross-platform | must | imap.search;imap.headers;workflow.fanout | Backfill a historical date range | The user requests older mail | sync.historical-range |
+| App user | New changed moved and expunged messages are reflected locally | Existing mailbox checkpoint | Incremental discovery reconciliation and idempotent upserts | cross-platform | must | sync.refresh;sync.cursor;sync.reconcile | Refresh recent metadata after new mail or flag changes | The app or scheduler starts an incremental refresh | sync.refresh |
+| App user | Processing resumes without repeating valid completed work | Persisted workflow and processing state | Expired-lease recovery dependency scheduling and result reuse | cross-platform | must | sync.interruption;processing.resume;processing.reuse | Continue work after force-quit crash or device restart | The library initializes with unfinished tasks | sync.resume |
+| App or Frontend user | The caller can display progress and diagnose blocked work | Run identifier | Structured events counters stages warnings and failures | cross-platform | should | workflow.progress;library.observability | Observe a long-running sync and processing run | A period workflow is active | sync.monitor |
+| App user | The workflow pauses and resumes without losing its checkpoint | Failure classification and retry-after data | Persisted bounded backoff and retry scheduling | cross-platform | must | workflow.retry;workflow.lifecycle | Recover from provider rate limiting or temporary network loss | IMAP returns a transient failure | sync.rate-limit |
+| Analyst | Label copies can be joined without corrupting fetch identity | Account, mailbox identities, X-GM-MSGID | Mailbox-location keys plus account-wide Gmail correlation | cross-platform | must | imap.gmail-identity | Correlate one Gmail message exposed through several labels | Gmail returns the same X-GM-MSGID with different UIDs | gmail.labels |
+| Library integrator | The transformer participates in durable per-email processing | A uniquely named Rust transformer | Typed transformer registration versioning retries and persisted output | cross-platform | must | processing.transformers;processing.pipeline | Add a domain-specific email transformation | The application initializes the library | processing.custom-transformer |
+| Library integrator | Independent results complete faster while dependencies remain correct | Pipeline dependency graph and execution limits | Bounded local CPU I/O and network parallelism | cross-platform | must | processing.parallel | Run independent extraction and classification steps concurrently | A fetched message has several ready transformations | processing.parallel |
+| Library integrator | The step eventually succeeds or reaches a stable failed state | Persisted attempts and idempotency key | Bounded backoff with crash-safe replay | cross-platform | must | processing.pipeline;workflow.retry | Retry a transient transformer failure | A transformer returns retry or throws a classified transient error | processing.retry |
+| Library integrator | Required analytics remain available without hiding the optional failure | Requiredness and persisted failure result | Job completion with warnings and exportable failure metadata | cross-platform | should | processing.pipeline;processing.duckdb-export | Allow useful results when a nonessential transformer fails | An optional step exhausts retries | processing.optional |
+| Library integrator | The step is marked reused without repeating computation or network calls | Transformer name, version, input fingerprint, output schema | Persisted result compatibility checks and reuse link | cross-platform | must | processing.reuse | Reuse an expensive valid transformation in a later run | A matching message is processed again | processing.reuse |
+| Analyst | Titles, dates, domains, and mailboxes are returned | Domain, UTC start, UTC end | Constrained email_metadata query with bound variables | cross-platform | must | query.constrained;query.logical-datasets | List messages from a company during a date range | A user searches for correspondence | query.domain-period |
+| Analyst | A chronological monthly count is returned | Domain, year | Virtual year and month dimensions with grouped count | cross-platform | must | query.aggregates | Count messages from one company per month | A user requests a yearly trend | query.domain-monthly |
+| Analyst | Each year and sender domain has a message count | Optional account or period filters | Grouped counts over logical live and archived data | cross-platform | must | query.aggregates;query.logical-datasets | Compare sender-domain volumes by year | A user requests domain trends | query.domain-yearly |
+| Analyst | A ranked domain list is returned | Optional period and account filters | Grouped count ordered by generated count alias | cross-platform | must | query.constrained;query.aggregates | Find the most frequent sender domains | A user requests a sender overview | query.all-domains |
+| Analyst | Attachment frequency and size distributions can be reported | Optional domain mailbox or period filters | Count average median and quantile over attachment count and size columns | cross-platform | should | query.aggregates;imap.bodystructure | Measure attachment prevalence and storage impact | A user requests attachment statistics | query.attachment-stats |
+| Analyst | Large-message patterns can be compared safely | Domain, percentile | Bound parameterized quantile and grouped statistics | cross-platform | should | query.aggregates | Identify unusually large email sources | A user requests message-size statistics | query.message-size |
+| Analyst | The caller receives one current deduplicated result set | Constrained query request | Logical dataset merges DuckDB live and exporting snapshots Parquet archives and corrections | cross-platform | must | query.logical-datasets;storage.archive-overlay | Query recent and archived mail through one API | A query spans the current and earlier months | query.live-and-history |
+| App user | The body is available temporarily without entering the metadata archive | Account, mailbox, UIDVALIDITY, UID | On-demand raw message fetch and temporary lease | cross-platform | must | content.fetch;content.temporary | Temporarily inspect a complete email body | A user explicitly opens a message | content.read-message |
+| App user | Only requested attachments are atomically published for temporary use | Message identity and MIME part identifiers | Selective MIME fetch size limit progress and content lease | cross-platform | should | content.parts;content.temporary | Download selected attachments only | A user selects one or more attachments | content.fetch-attachment |
+| App or automation | A temporary Markdown artifact is returned | Message identity and body selection | On-demand HTML fetch extraction and Markdown conversion | cross-platform | could | content.transform;content.markdown | Convert an HTML email into Markdown | A caller requests a Markdown representation | content.to-markdown |
+| App or operator | Disposable content is removed without affecting metadata | Lease identifiers and cleanup policy | Explicit release expiry cleanup and abandoned-partial removal | cross-platform | must | content.temporary | Reclaim space used by downloaded bodies and attachments | A lease expires or cleanup is requested | content.cleanup |
+| Frontend user | A deterministic CSV file is produced without downloading bodies | Query request and destination | Safe analytical query and CSV serializer | cross-platform | must | export.csv;query.constrained | Export filtered metadata for spreadsheet analysis | A constrained query has been defined | export.csv |
+| Developer | A deterministic machine-readable JSON document is produced | Query request and destination | Safe analytical query and JSON serializer | cross-platform | must | export.json;query.constrained | Export filtered metadata for another local tool | A constrained query has been defined | export.json |
+| Operator | Monthly email and processing datasets are durably archived | Verified DuckDB period and schema versions | Immutable staging write verification atomic publish and manifest commit | cross-platform | must | storage.monthly-archive;storage.atomicity | Archive a closed month to Parquet | A full UTC calendar month closes or a complete historical month is selected | archive.month |
+| Operator | The archive completes without losing or duplicating rows | Persisted archive batch and manifest | DuckDB exporting snapshot retry and atomic publication | cross-platform | must | storage.atomicity;workflow.retry | Resume a failed Parquet publication | A write verification or process interruption occurs | archive.retry |
+| App user | Queries immediately show current state and Parquet is eventually corrected | Logical key source version and change or tombstone | DuckDB correction overlay merged queries and later compaction | cross-platform | must | storage.archive-overlay;sync.reconcile | Reflect a late flag label move or expunge in an old month | Incremental sync detects a change to archived metadata | archive.correct |
+| Operator | The responsible stage and actionable failure are visible | Run, task, job, or message identity | Queryable attempts state transitions errors timestamps and progress | cross-platform | should | workflow.audit;library.observability | Investigate why an email or period did not complete | A workflow is failed blocked or unexpectedly slow | diagnostics.audit |
+| Frontend backend | Connections and auth persist within the session; durable work survives reopen with fresh credentials | Library root configuration and authentication parameters | Open configure authenticate call poll cancel close | cross-platform | must | library.session;library.async;account.secrets | Retain library state across frontend requests | The backend starts or stops | session.lifecycle |
 
 ## 03 Architecture and Period Workflow
 
@@ -166,16 +322,16 @@ Physical layout, ownership, lifecycle, and recovery responsibilities. Source: [d
 
 | authority | datastore_id | layer | logical_contents | mutability | physical_scope | primary_input | primary_output | readers | retention_and_lifecycle | security_and_recovery_notes | technology | writers |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Authoritative for secrets | secrets.keychain | Secrets | Passwords, OAuth tokens, refresh tokens, and credential material | Mutable | OS-managed keychain and configured access group | Provider authorization | Authenticated IMAP sessions | Authentication services and authorized headless CLI or daemon | Retain while the account exists and delete explicitly with account removal | Never copy secrets into Core Data, DuckDB, Parquet, logs, or exports; locked or unavailable access fails deterministically | Apple Keychain | Account and authentication services |
-| Operational source of truth | operational.coredata | Operational | Account configuration, mailboxes, workflow plans/runs/tasks/attempts/dependencies, checkpoints, fetch operations, processing jobs/steps/results, leases, and DuckDB export checkpoints | Mutable transactional | One application-local persistent store with logical isolation by accountID | User configuration and workflow subsystem state | DuckDB projections and resumable work | App CLI scheduler and diagnostic views | Retain active state and reusable results; prune only through explicit versioned retention policies and Core Data migrations | Use one NSPersistentContainer with private-queue writer contexts indexed identities and an exclusive process writer lock; account rows are logically isolated and there is no direct SQLite access. | Apple Core Data SQLite store | Core Data contexts owned by account workflow processing fetch and exporter services |
-| Replayable downstream projection | analytics.duckdb.email_live | Hot analytics | Recent normalized email headers metadata and promoted analytical fields following email_metadata_parquet_columns.csv | Mutable transactional upsert | One DuckDB database beneath each account folder | Durable metadata-fetch results | Email metadata Parquet archive and analytical queries | Library queries CLI exports and Parquet archiver | Keep open-period rows queryable until claimed for verified monthly archival | Upsert by the durable mailbox message key using persisted globally allocated source revisions; Core Data and IMAP remain authoritative. | DuckDB table group email_metadata_live | DuckDBExporter and metadata projector |
-| Replayable downstream projection | analytics.duckdb.processing_live | Hot analytics | Stable terminal transformer results and typed analytical columns with transformer-specific JSON | Mutable transactional upsert | Same per-account DuckDB database | Core Data EmailProcessingStep plus ProcessingResultExportState | Processing-result Parquet archive and analytical queries | Library queries CLI exports and Parquet archiver | Keep recent rows until claimed for verified monthly archival | Conflict key includes durable message identity, transformerName, and transformerVersion; replay after dual-store commit gaps is safe | DuckDB table email_processing_results_live | DuckDBExporter |
+| Ephemeral caller-supplied authentication | session.authentication | Secrets | Selected mechanism username and password or accessToken plus authenticated IMAP connections | Mutable | Per library session and account | Authentication API parameters | Authenticated IMAP sessions | IMAP authentication adapter | Replace explicitly or clear on logout and close; never survive process restart | No OS credential-store dependency; redact secrets and protocol authentication traces; host handles OAuth acquisition and refresh | Rust-owned memory | Session authentication service |
+| Operational source of truth | operational.sqlite | Operational | Account configuration, mailboxes, workflow plans/runs/tasks/attempts/dependencies, checkpoints, fetch operations, processing jobs/steps/results, leases, and DuckDB export checkpoints | Mutable transactional | One application-local persistent store with logical isolation by accountID | User configuration and workflow subsystem state | DuckDB projections and resumable work | Session APIs and read connections | Retain active state and reusable results; prune only through explicit versioned retention policies and SQLite migrations | Use explicit versioned SQL migrations foreign_keys=ON on every connection WAL journal mode a bounded busy timeout and durable synchronous policy; acquire exclusive portable process writer ownership for the library root; use parameterized SQL and transactional claims | SQLite database | Session-owned serialized SQLite writer |
+| Replayable downstream projection | analytics.duckdb.email_live | Hot analytics | Recent normalized email headers metadata and promoted analytical fields following email_metadata_parquet_columns.csv | Mutable transactional upsert | One DuckDB database beneath each account folder | Durable metadata-fetch results | Email metadata Parquet archive and analytical queries | Library queries exports and Parquet archiver | Keep open-period rows queryable until claimed for verified monthly archival | Upsert by the durable mailbox message key using persisted globally allocated source revisions; SQLite and IMAP remain authoritative. | DuckDB table group email_metadata_live | DuckDBExporter and metadata projector |
+| Replayable downstream projection | analytics.duckdb.processing_live | Hot analytics | Stable terminal transformer results and typed analytical columns with transformer-specific JSON | Mutable transactional upsert | Same per-account DuckDB database | SQLite EmailProcessingStep plus ProcessingResultExportState | Processing-result Parquet archive and analytical queries | Library queries exports and Parquet archiver | Keep recent rows until claimed for verified monthly archival | Conflict key includes durable message identity, transformerName, and transformerVersion; replay after dual-store commit gaps is safe | DuckDB table email_processing_results_live | DuckDBExporter |
 | Durable staging copy but not operational authority | analytics.duckdb.exporting | Archive staging | Immutable email metadata and processing-result snapshots claimed for a specific archive batch | Append and delete by transaction | Same per-account DuckDB database | DuckDB live tables | Parquet writer | Parquet writer verifier diagnostics and logical analytical queries | Retain through failures and restarts; delete only after verified Parquet publication and archive-manifest commit | Archive batch IDs and source versions prevent live updates from mutating an in-flight snapshot | DuckDB exporting table groups | DuckDB archive coordinator |
 | Authoritative local record of downstream archive publication | analytics.duckdb.archive_manifest | Archive control | Dataset name archive batch state partition identity schema version expected batch count verified file row count Parquet path digest and commit timestamp | Transactional state transitions | Same per-account DuckDB database | DuckDB archive coordinator | Archive verification and repair | Workflow coordinator diagnostics and repair tools | Retain committed manifests for audit and reconciliation | Commit manifest and delete exporting rows in one DuckDB transaction | DuckDB archive_manifest table | DuckDB archive coordinator |
 | Replayable mutable overlay | analytics.duckdb.corrections | Archive overlay | Changes to metadata or processing results discovered after their monthly Parquet partition was sealed | Mutable transactional upsert | Same per-account DuckDB database | Incremental sync reconciliation and processing-result corrections | Queries merged with Parquet and later partition compaction | Analytical queries and Parquet compactor | Retain until atomically compacted into the affected Parquet partition; preserve newer changes arriving during compaction | Use source versions and tombstones so stale archive data is never returned as current | DuckDB correction and tombstone table groups | DuckDBExporter sync reconciler and correction projector |
-| Durable historical analytical archive | archive.parquet.email_metadata | Historical analytics | Normalized email headers metadata MIME structure provider fields and derived statistics | Immutable between atomic compactions | One dataset partition per account mailbox and UTC calendar month | DuckDB immutable exporting batches | Long-term queries CSV or JSON exports and backup | DuckDB query layer CLI and external analytical tools | Retain according to user archive policy; replace only through verified atomic publication or correction compaction | Use schema_version, stable core columns, extensions MAP, verified row count, digest, and atomic rename | Parquet files on local filesystem | Parquet archiver and compactor |
-| Durable historical analytical archive | archive.parquet.processing_results | Historical analytics | Stable per-transformer processing results keyed separately from one-row-per-message metadata | Immutable between atomic compactions | One processing-result dataset partition per account mailbox and UTC calendar month | DuckDB processing-result exporting batches | Long-term transformer analytics joined to email metadata | DuckDB query layer CLI and external analytical tools | Retain with the corresponding email-metadata period; replace only through verified correction compaction | Preserve message join keys transformerName transformerVersion globally allocated sourceVersion and output schema version; use typed core columns and a Parquet MAP of canonical JSON extension values. | Parquet files on local filesystem | Parquet archiver and compactor |
-| Recoverable intermediate checkpoint | filesystem.intermediate | Workflow artifacts | Normalized metadata-fetch results and large transformation outputs referenced by Core Data | Write then publish atomically | Per-account versioned work directory | IMAP fetches and transformers | Email processing and DuckDB projection | Workflow coordinator transformers and DuckDBExporter | Retain while referenced by incomplete or reusable Core Data work; remove only after downstream acknowledgement and retention checks | Store only relative locators and integrity fingerprints in Core Data; never place credentials here | Managed local files beneath each account folder | IMAP metadata fetcher and processing pipeline |
+| Durable historical analytical archive | archive.parquet.email_metadata | Historical analytics | Normalized email headers metadata MIME structure provider fields and derived statistics | Immutable between atomic compactions | One dataset partition per account mailbox and UTC calendar month | DuckDB immutable exporting batches | Long-term queries CSV or JSON exports and backup | DuckDB query layer frontend and external analytical tools | Retain according to user archive policy; replace only through verified atomic publication or correction compaction | Use schema_version, stable core columns, extensions MAP, verified row count, digest, and atomic rename | Parquet files on local filesystem | Parquet archiver and compactor |
+| Durable historical analytical archive | archive.parquet.processing_results | Historical analytics | Stable per-transformer processing results keyed separately from one-row-per-message metadata | Immutable between atomic compactions | One processing-result dataset partition per account mailbox and UTC calendar month | DuckDB processing-result exporting batches | Long-term transformer analytics joined to email metadata | DuckDB query layer frontend and external analytical tools | Retain with the corresponding email-metadata period; replace only through verified correction compaction | Preserve message join keys transformerName transformerVersion globally allocated sourceVersion and output schema version; use typed core columns and a Parquet MAP of canonical JSON extension values. | Parquet files on local filesystem | Parquet archiver and compactor |
+| Recoverable intermediate checkpoint | filesystem.intermediate | Workflow artifacts | Normalized metadata-fetch results and large transformation outputs referenced by SQLite | Write then publish atomically | Per-account versioned work directory | IMAP fetches and transformers | Email processing and DuckDB projection | Workflow coordinator transformers and DuckDBExporter | Retain while referenced by incomplete or reusable SQLite work; remove only after downstream acknowledgement and retention checks | Store only relative locators and integrity fingerprints in SQLite; never place credentials here | Managed local files beneath each account folder | IMAP metadata fetcher and processing pipeline |
 | Disposable cache | filesystem.temporary_content | Disposable content | On-demand raw messages bodies MIME parts inline resources and attachments | Mutable lease-managed | Per-account leased temporary directory | On-demand IMAP content fetch | Caller-controlled short-lived processing | Authorized caller during an active content lease | Delete on explicit release TTL expiry or active-fetch cancellation; while-in-use leases survive only their owning process session; clean up abandoned partial files after restart. | Never treat as archive or processing source of truth; publish complete artifacts atomically and sanitize filenames | Managed local files beneath each account temporary-content folder | FetchEmailClient |
 
 ### 02 Library Processing Flows
@@ -198,11 +354,12 @@ export type FlowStep = {
 /** Library initialization and durable-work recovery. */
 export const initializationFlow: FlowStep[] = [
   {
-    from: "AppOrCLI",
+    from: "FrontendBackend",
     to: "SeleneTideLibrary",
     action: "initialize",
-    data: ["configuration", "transformers"],
-    notes: "Acquire exclusive process writer ownership for the shared Core Data store before starting recovery.",
+    data: ["configuration"],
+    notes: "Frontend retains the returned session handle. Rust-internal transformers are registered before recovery.",
+
   },
   {
     from: "SeleneTideLibrary",
@@ -220,19 +377,20 @@ export const initializationFlow: FlowStep[] = [
   },
   {
     from: "SeleneTideLibrary",
-    to: "CoreDataStore",
-    action: "loadPersistentStoresAndMigrate",
-    data: ["coreDataModelVersion"],
+    to: "SQLiteStore",
+    action: "openAndMigrate",
+    data: ["sqliteSchemaVersion"],
   },
   {
     from: "SeleneTideLibrary",
     to: "DuckDBStore",
     action: "openAndMigrate",
     data: ["duckDBSchemaVersion"],
+    when: "the account first needs analytics; connections remain session-owned",
   },
   {
     from: "WorkflowCoordinator",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "findRecoverableWork",
     data: ["expiredLeases", "pendingTasks", "retryDueTasks", "blockedTasks"],
   },
@@ -244,7 +402,7 @@ export const initializationFlow: FlowStep[] = [
   },
   {
     from: "WorkflowCoordinator",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "markBlocked",
     data: ["failureCode=transformer.missing"],
     when: "a historical persisted transformer name is not registered",
@@ -254,26 +412,26 @@ export const initializationFlow: FlowStep[] = [
     from: "WorkflowCoordinator",
     to: "WorkflowCoordinator",
     action: "resumeEligibleWork",
-    when: "stores and current pipeline definitions are valid",
+    when: "stores and pipeline definitions are valid; network tasks wait for caller-supplied authentication",
   },
 ];
 
 /** Complete account/mailbox/period workflow, normally for one UTC month. */
 export const periodProcessingFlow: FlowStep[] = [
   {
-    from: "AppOrCLI",
+    from: "FrontendBackend",
     to: "SyncClient",
     action: "plan",
     data: ["accountID", "mailboxes", "period", "mode"],
   },
   {
     from: "SyncClient",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "persistPeriodPlan",
     data: ["periodStart", "periodEndExclusive", "partitionMonth"],
   },
   {
-    from: "AppOrCLI",
+    from: "FrontendBackend",
     to: "WorkflowCoordinator",
     action: "startPlan",
     data: ["planID"],
@@ -293,7 +451,7 @@ export const periodProcessingFlow: FlowStep[] = [
   },
   {
     from: "WorkflowCoordinator",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "persistDiscoveryPageAndFanOut",
     data: ["discoveryCursor", "metadataFetchTasks"],
     notes: "Cursor and idempotent child tasks commit atomically; child tasks run immediately so bounded discovery can drain.",
@@ -320,7 +478,7 @@ export const periodProcessingFlow: FlowStep[] = [
   },
   {
     from: "EmailProcessingPipeline",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "persistTerminalJob",
     data: ["processingJobID", "jobState", "stepResults"],
     notes: "Per-email jobs may execute concurrently under configured limits.",
@@ -361,7 +519,7 @@ export const periodProcessingFlow: FlowStep[] = [
   },
   {
     from: "WorkflowCoordinator",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "completePeriodRun",
     data: ["finalCounters", "periodCheckpoint", "finishedAt"],
     notes: "Open-month and partial/multi-month range runs complete after projection verification without archive stages.",
@@ -378,13 +536,13 @@ export const emailTransformationFlow: FlowStep[] = [
   },
   {
     from: "EmailProcessingPipeline",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "loadJobAndSteps",
     data: ["pipelineVersion", "stepStates", "dependencyOutputs"],
   },
   {
     from: "EmailProcessingPipeline",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "reuseCompatibleResults",
     data: ["transformerName", "transformerVersion", "inputFingerprint", "outputSchemaVersion"],
     when: "a valid succeeded result already exists",
@@ -398,7 +556,7 @@ export const emailTransformationFlow: FlowStep[] = [
   },
   {
     from: "EmailProcessingPipeline",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "claimReadySteps",
     data: ["leaseOwner", "leaseExpiresAt", "attemptCount"],
     notes: "The scheduler serializes claims; independent claimed dependency branches execute concurrently.",
@@ -418,43 +576,43 @@ export const emailTransformationFlow: FlowStep[] = [
   },
   {
     from: "EmailProcessingPipeline",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "commitStepResultAtomically",
     data: ["stepState", "officialStatus", "customStatus", "statusMessage", "outputData", "timestamps"],
     notes: "The terminal state and persisted output become visible in the same save.",
   },
   {
     from: "EmailProcessingPipeline",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "scheduleRetry",
     data: ["nextAttemptAt", "attemptCount", "failureCode"],
     when: "officialStatus is retry and attempts remain",
   },
   {
     from: "EmailProcessingPipeline",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "finishJob",
     data: ["succeeded", "succeededWithWarnings", "failed"],
     when: "every instantiated step is terminal and required-step outcomes determine success or failure",
   },
 ];
 
-/** Idempotent Core Data to DuckDB export, including the dual-commit crash gap. */
+/** Idempotent SQLite to DuckDB export, including the dual-commit crash gap. */
 export const duckDBProjectionRecoveryFlow: FlowStep[] = [
   {
     from: "DuckDBExporter",
     to: "DuckDBStore",
     action: "prepareSchema",
-    notes: "Open migrate and validate before claiming Core Data work; retain the in-flight gate across awaits.",
+    notes: "Open migrate and validate before claiming SQLite work; retain the in-flight gate across awaits.",
   },
   {
     from: "DuckDBExporter",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "claimStableResultBatch",
     data: ["batchID", "leaseOwner", "leaseExpiresAt", "sourceVersions"],
   },
   {
-    from: "CoreDataStore",
+    from: "SQLiteStore",
     to: "DuckDBExporter",
     action: "returnImmutableRows",
     data: ["metadataRows", "processingResultRows"],
@@ -478,7 +636,7 @@ export const duckDBProjectionRecoveryFlow: FlowStep[] = [
   },
   {
     from: "DuckDBExporter",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "acknowledgeExport",
     data: ["batchID", "claimedSourceVersions", "exportedAt", "duckDBSchemaVersion"],
     notes: "Fence by batchID and preserve newer source revisions as pending.",
@@ -487,11 +645,11 @@ export const duckDBProjectionRecoveryFlow: FlowStep[] = [
     from: "System",
     to: "DuckDBExporter",
     action: "restartAfterCommitGap",
-    when: "DuckDB committed but Core Data acknowledgement did not",
+    when: "DuckDB committed but SQLite acknowledgement did not",
   },
   {
     from: "DuckDBExporter",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "reclaimExpiredBatch",
     data: ["batchID", "sourceVersions"],
   },
@@ -504,7 +662,7 @@ export const duckDBProjectionRecoveryFlow: FlowStep[] = [
   },
   {
     from: "DuckDBExporter",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "acknowledgeRecoveredExport",
   },
 ];
@@ -576,14 +734,14 @@ export const parquetArchiveFlow: FlowStep[] = [
 /** Explicit on-demand body or attachment retrieval. */
 export const onDemandContentFlow: FlowStep[] = [
   {
-    from: "AppOrCLI",
+    from: "FrontendBackend",
     to: "FetchEmailClient",
     action: "start",
     data: ["messageIdentity", "selection", "transform", "retention", "maximumBytes"],
   },
   {
     from: "FetchEmailClient",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "persistFetchOperation",
     data: ["fetchID", "state=pending"],
   },
@@ -606,12 +764,12 @@ export const onDemandContentFlow: FlowStep[] = [
   },
   {
     from: "FetchEmailClient",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "persistContentLeaseAndResult",
     data: ["leaseID", "ownerSessionID", "expiresAt", "artifacts", "state=completed"],
   },
   {
-    from: "AppOrCLI",
+    from: "FrontendBackend",
     to: "FetchEmailClient",
     action: "release",
     data: ["leaseID"],
@@ -633,6 +791,20 @@ export const libraryProcessingFlows = {
   parquetArchive: parquetArchiveFlow,
   onDemandContent: onDemandContentFlow,
 };
+
+/** Authentication state is ephemeral and explicitly supplied by the host. */
+export const authenticationFlow: FlowStep[] = [
+  { from: "FrontendBackend", to: "Session", action: "auth.set",
+    data: ["accountID", "exactlyOneMechanism", "username", "passwordOrAccessToken"],
+    notes: "No credential material is persisted or echoed. The host owns OAuth refresh." },
+  { from: "Session", to: "IMAPClient", action: "replaceAuthenticationGeneration",
+    notes: "Close old connections; selected mechanism requires verified TLS and server support." },
+  { from: "IMAPClient", to: "Session", action: "authenticationRequired",
+    when: "credentials are absent invalid or expired",
+    notes: "Block network work until new auth.set parameters and explicit resume." },
+  { from: "FrontendBackend", to: "Session", action: "close",
+    notes: "Reject new calls drain workers clear secrets close stores release ownership invalidate handle." },
+];
 ```
 
 ### 03 Period Workflow Stages
@@ -681,7 +853,7 @@ UTC boundaries, stage gates, backpressure, retries, and completion. Source: [per
 | Processing | Prevents silent partial analytical datasets | Block period export when a required email-processing job failed unless policy explicitly excludes that message and records the exclusion. | process.required_failure |
 | DuckDB | Defines a reproducible period snapshot | Create period export tasks only after discovery is complete and every included message has stable metadata and a succeeded or succeededWithWarnings processing job; required failures block the run unless an explicit persisted exclusion policy applies. | duckdb.gate |
 | DuckDB | Produces a joinable analytical period | Upsert both email metadata using email_metadata_parquet_columns.csv and stable transformer results using duckdb_processing_export_tables.csv. | duckdb.contents |
-| DuckDB | Allows restart without restarting the entire period | Run configurable idempotent batches until every eligible source version in the period is acknowledged in Core Data. | duckdb.batches |
+| DuckDB | Allows restart without restarting the entire period | Run configurable idempotent batches until every eligible source version in the period is acknowledged in SQLite. | duckdb.batches |
 | DuckDB | Prevents incomplete Parquet publication | Verify logical keys source versions expected counts and absence of pending export claims before allowing archival. | duckdb.verify |
 | Parquet | Avoids racing normal changes in an open month | Instantiate archive stages only for one complete closed UTC calendar month; open months and partial or multi-month date ranges complete after DuckDB verification and retain unarchived rows for later full-month plans. | archive.eligibility |
 | Parquet | Produces deterministic Parquet output | For initial monthly publication read only immutable exporting snapshots; correction compaction reads a fixed prior archive plus claimed overlay revisions and never changing live rows. | archive.snapshot |
@@ -692,191 +864,190 @@ UTC boundaries, stage gates, backpressure, retries, and completion. Source: [per
 | Recovery | Lets subsystem idempotency close crash gaps | Inspect linked processing export and archive identifiers before retrying a coordinating task. | recovery.subsystems |
 | Failure handling | Distinguishes transient IMAP processing storage and archive failures | Apply task-kind-specific bounded retry policies and retain attempts and sanitized errors. | failure.retry |
 | Failure handling | Avoids destructive automatic guesses | Mark the run blocked when credentials transformers schema compatibility or operator policy prevents safe progress. | failure.blocked |
-| Backpressure | Bounds Core Data rows memory and network pressure | Pause discovery fan-out when the number of unfinished per-email tasks exceeds a configured high-water mark. | backpressure.discovery |
+| Backpressure | Bounds SQLite rows memory and network pressure | Pause discovery fan-out when the number of unfinished per-email tasks exceeds a configured high-water mark. | backpressure.discovery |
 | Completion | Provides one durable end-to-end outcome | Complete the run after DuckDB verification and every instantiated archive stage succeeds; reconcile counters and persist a SyncPeriodCheckpoint, without treating a period-limited UID cursor as complete mailbox coverage. | completion.run |
-| Persistence | Maintains Core Data as an operational store | Keep task payloads small and versioned and never store message bodies credentials or large UID arrays in workflow rows. | payload.boundary |
+| Persistence | Maintains SQLite as an operational store | Keep task payloads small and versioned and never store message bodies credentials or large UID arrays in workflow rows. | payload.boundary |
 | Discovery | Allows bounded fan-out to drain instead of deadlocking at the high-water mark | Each metadata.fetch child becomes runnable after its producing discovery page and task are committed; do not wait for all mailbox discovery pages before consuming children. | discover.child_gate |
 | Discovery | Avoids skipping historical messages or boundary candidates | Treat server date searches and highestObservedUID as discovery aids; verify canonical UTC email_date against the requested half-open range and broaden discovery when fallback dates may lie outside the server candidate range. | discover.period_filter |
 | Persistence | Prevents one partial-range sync from suppressing another | Persist completed coverage by account mailbox UIDVALIDITY periodStart and periodEndExclusive in SyncPeriodCheckpoint; highestObservedUID is a mailbox-wide hint and never proves range coverage. | checkpoint.period |
 | Recovery | Makes generic workflow tasks as restart-safe as processing steps | Claim SyncTask with leaseOwner leaseExpiresAt and attemptCount atomically; fence completion by the current task claim and reclaim only expired unfinished work. | workflow.claim |
-| Concurrency | An in-process actor alone cannot coordinate independent processes | Acquire exclusive process writer ownership for the shared Core Data store before initialization and hold it until shutdown; a competing app CLI or daemon fails with an actionable busy error. | workflow.writer |
+| Concurrency | An in-process worker alone cannot coordinate independent processes | Acquire exclusive process writer ownership for the shared SQLite store before initialization and hold it until shutdown; a competing backend process fails with an actionable busy error. | workflow.writer |
 | Recovery | Aligns durable cancellation with the public resumable API | Cancellation ends the current event stream and preserves completed work; explicit resume resets cancelled unfinished tasks to pending clears cancellation and retains attempt ceilings. | workflow.cancel |
 | Progress | Keeps progress stable across replay and partition replacement | Count distinct durable task message and result-version completions; replay acknowledgements do not increment counters twice and archivedRecords counts newly finalized batch rows across both datasets. | progress.idempotent |
 | Persistence | Fallback dates and first-seen timestamps must not change when a metadata file or old run is pruned | Copy canonical emailDate emailDateSource and firstSeenAt from the latest MetadataExportState when refreshing an existing message; retain that checkpoint and its owning task while the message identity is retained and prune only superseded snapshots. | metadata.identity_retention |
 
 ### 05 Account and Workflow Persistence Fields
 
-Swift-facing field shapes for accounts, plans, runs, tasks, checkpoints, and temporary content; Core Data storage follows the datastore and pipeline rules. Source: [coredata_workflow_fields.csv](../design-meta/examples/sync/coredata_workflow_fields.csv).
+Logical persistence field shapes for accounts, plans, runs, tasks, checkpoints, and temporary content; SQLite storage follows the datastore and pipeline rules. Source: [sqlite_workflow_fields.csv](../design-meta/examples/sync/sqlite_workflow_fields.csv).
 
 #### Account and Workflow Persistence Fields
 
-| default_value | description | entity | field | field_id | indexed | relationship | required | swift_type | unique |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-|  | Stable local account identifier | Account | id | account.id | yes |  | yes | UUID | yes |
-|  | User-visible account name | Account | displayName | account.display_name | no |  | yes | String | no |
-|  | Normalized primary email address | Account | emailAddress | account.email_address | yes |  | yes | String | no |
-| imap | Raw provider enum such as gmail or imap | Account | providerKind | account.provider_kind | no |  | yes | String | no |
-|  | IMAP server hostname | Account | imapHost | account.imap_host | no |  | yes | String | no |
-| 993 | IMAP server port | Account | imapPort | account.imap_port | no |  | yes | Int | no |
-| tls | Raw transport-security enum | Account | transportSecurity | account.transport_security | no |  | yes | String | no |
-|  | IMAP login identity; not a secret | Account | username | account.username | no |  | yes | String | no |
-|  | Opaque lookup identifier for credentials held only in Keychain | Account | keychainCredentialID | account.keychain_credential_id | yes |  | yes | String | yes |
-|  | Stable filesystem subfolder name such as account1 | Account | folderName | account.folder_name | yes |  | yes | String | yes |
-| true | Whether scheduled and manual sync may run | Account | isEnabled | account.is_enabled | yes |  | yes | Bool | no |
-|  | Creation timestamp | Account | createdAt | account.created_at | no |  | yes | Date | no |
-|  | Last configuration-change timestamp | Account | updatedAt | account.updated_at | no |  | yes | Date | no |
-| [] | Known mailboxes for this account | Account | mailboxes | account.mailboxes | no | one-to-many; inverse=account; delete=cascade | yes | [Mailbox] | no |
-| [] | Durable sync plans owned by this account | Account | syncPlans | account.sync_plans | no | one-to-many; inverse=account; delete=cascade | yes | [SyncPlan] | no |
-| [] | On-demand fetch operations owned by this account | Account | fetchOperations | account.fetch_operations | no | one-to-many; inverse=account; delete=cascade | yes | [FetchOperation] | no |
-|  | Stable local mailbox identifier | Mailbox | id | mailbox.id | yes |  | yes | UUID | yes |
-|  | Owning account | Mailbox | account | mailbox.account | yes | many-to-one; inverse=mailboxes | yes | Account | no |
-|  | Exact server mailbox name; unique within an account | Mailbox | serverName | mailbox.server_name | yes |  | yes | String | no |
-|  | Decoded user-visible mailbox name | Mailbox | displayName | mailbox.display_name | no |  | yes | String | no |
-|  | Server hierarchy delimiter when advertised | Mailbox | delimiter | mailbox.delimiter | no |  | no | String | no |
-| [] | Normalized IMAP mailbox attributes | Mailbox | attributes | mailbox.attributes | no |  | yes | [String] | no |
-| true | Whether the mailbox may be selected | Mailbox | isSelectable | mailbox.is_selectable | no |  | yes | Bool | no |
-|  | First discovery timestamp | Mailbox | discoveredAt | mailbox.discovered_at | no |  | yes | Date | no |
-|  | Last discovery or attribute-update timestamp | Mailbox | updatedAt | mailbox.updated_at | no |  | yes | Date | no |
-|  | Durable incremental-sync cursor | Mailbox | checkpoint | mailbox.checkpoint | no | one-to-one; inverse=mailbox; delete=cascade | no | MailboxCheckpoint | yes |
-|  | Stable plan identifier | SyncPlan | id | sync_plan.id | yes |  | yes | UUID | yes |
-|  | Account to synchronize | SyncPlan | account | sync_plan.account | yes | many-to-one; inverse=syncPlans | yes | Account | no |
-|  | Raw mode enum: initial incremental or reconcile | SyncPlan | mode | sync_plan.mode | yes |  | yes | String | no |
-| calendar-month | Raw period enum: calendar-month or date-range, matching the API discriminators | SyncPlan | periodKind | sync_plan.period_kind | no |  | yes | String | no |
-|  | Inclusive UTC period boundary | SyncPlan | periodStart | sync_plan.period_start | yes |  | yes | Date | no |
-|  | Exclusive UTC period boundary | SyncPlan | periodEndExclusive | sync_plan.period_end_exclusive | yes |  | yes | Date | no |
-|  | YYYY-MM when the plan covers exactly one UTC calendar month | SyncPlan | partitionMonth | sync_plan.partition_month | yes |  | no | String | no |
-| true | Invariant preventing content downloads during sync | SyncPlan | metadataOnly | sync_plan.metadata_only | no |  | yes | Bool | no |
-| ready | Raw state enum: ready or superseded | SyncPlan | state | sync_plan.state | yes |  | yes | String | no |
-|  | Plan creation timestamp | SyncPlan | createdAt | sync_plan.created_at | no |  | yes | Date | no |
-| [] | Empty means all; include selection must contain at least one unique mailbox ID owned by this account | SyncPlan | mailboxSelections | sync_plan.mailbox_selections | no | one-to-many; inverse=plan; delete=cascade | yes | [SyncPlanMailbox] | no |
-| [] | Execution history for the plan | SyncPlan | runs | sync_plan.runs | no | one-to-many; inverse=plan; delete=cascade | yes | [SyncRun] | no |
-|  | Stable selection-row identifier | SyncPlanMailbox | id | sync_plan_mailbox.id | yes |  | yes | UUID | yes |
-|  | Owning plan | SyncPlanMailbox | plan | sync_plan_mailbox.plan | yes | many-to-one; inverse=mailboxSelections | yes | SyncPlan | no |
-|  | Selected mailbox; unique with plan | SyncPlanMailbox | mailbox | sync_plan_mailbox.mailbox | yes | many-to-one | yes | Mailbox | no |
-|  | Stable run identifier | SyncRun | id | sync_run.id | yes |  | yes | UUID | yes |
-|  | Plan being executed | SyncRun | plan | sync_run.plan | yes | many-to-one; inverse=runs | yes | SyncPlan | no |
-| pending | Raw workflow-state enum | SyncRun | state | sync_run.state | yes |  | yes | String | no |
-| 0 | Completed task count | SyncRun | completedTasks | sync_run.completed_tasks | no |  | yes | Int64 | no |
-| 0 | Total planned task count | SyncRun | totalTasks | sync_run.total_tasks | no |  | yes | Int64 | no |
-| 0 | Messages discovered during this run | SyncRun | discoveredMessages | sync_run.discovered_messages | no |  | yes | Int64 | no |
-| 0 | Metadata records fetched from IMAP | SyncRun | fetchedMetadataRecords | sync_run.fetched_metadata_records | no |  | yes | Int64 | no |
-| 0 | Metadata records upserted into the DuckDB live store | SyncRun | updatedMetadataRecords | sync_run.updated_metadata_records | no |  | yes | Int64 | no |
-| 0 | Metadata records removed during reconciliation | SyncRun | removedMetadataRecords | sync_run.removed_metadata_records | no |  | yes | Int64 | no |
-| 0 | Messages whose required transformation pipeline completed | SyncRun | processedMessages | sync_run.processed_messages | no |  | yes | Int64 | no |
-| 0 | Stable transformation results acknowledged in DuckDB | SyncRun | exportedProcessingResults | sync_run.exported_processing_results | no |  | yes | Int64 | no |
-| 0 | DuckDB rows verified and published to Parquet | SyncRun | archivedRecords | sync_run.archived_records | no |  | yes | Int64 | no |
-|  | Raw blocking-reason enum | SyncRun | blockingKind | sync_run.blocking_kind | yes |  | no | String | no |
-|  | Non-secret diagnostic detail | SyncRun | blockingDetail | sync_run.blocking_detail | no |  | no | String | no |
-|  | Stable failure code | SyncRun | failureCode | sync_run.failure_code | yes |  | no | String | no |
-|  | Sanitized failure summary without message content or credentials | SyncRun | failureMessage | sync_run.failure_message | no |  | no | String | no |
-|  | Run creation timestamp | SyncRun | createdAt | sync_run.created_at | no |  | yes | Date | no |
-|  | First start timestamp | SyncRun | startedAt | sync_run.started_at | no |  | no | Date | no |
-|  | Terminal-state timestamp | SyncRun | finishedAt | sync_run.finished_at | no |  | no | Date | no |
-| [] | Durable task graph for this run | SyncRun | tasks | sync_run.tasks | no | one-to-many; inverse=run; delete=cascade | yes | [SyncTask] | no |
-| false | Retryability of the latest run failure | SyncRun | failureRetryable | sync_run.failure_retryable | no |  | yes | Bool | no |
-|  | Stable task identifier | SyncTask | id | sync_task.id | yes |  | yes | UUID | yes |
-|  | Owning run | SyncTask | run | sync_task.run | yes | many-to-one; inverse=tasks | yes | SyncRun | no |
-|  | Mailbox scope when applicable | SyncTask | mailbox | sync_task.mailbox | yes | many-to-one | no | Mailbox | no |
-|  | Stable task-kind identifier | SyncTask | kind | sync_task.kind | yes |  | yes | String | no |
-|  | Stable period-workflow stage identifier | SyncTask | stage | sync_task.stage | yes |  | yes | String | no |
-|  | Message UIDVALIDITY for per-email tasks | SyncTask | uidValidity | sync_task.uid_validity | yes |  | no | Int64 | no |
-|  | Message IMAP UID for per-email tasks | SyncTask | emailUID | sync_task.email_uid | yes |  | no | Int64 | no |
-|  | Linked EmailProcessingJob identifier for transformation tasks | SyncTask | processingJobID | sync_task.processing_job_id | yes |  | no | UUID | no |
-|  | Linked Core Data to DuckDB export batch | SyncTask | exportBatchID | sync_task.export_batch_id | yes |  | no | UUID | no |
-|  | Linked DuckDB to Parquet archive batch | SyncTask | archiveBatchID | sync_task.archive_batch_id | yes |  | no | UUID | no |
-| 1 | Schema version for the task payload | SyncTask | payloadVersion | sync_task.payload_version | no |  | yes | Int | no |
-|  | Small versioned Codable parameters; never message content or credentials | SyncTask | payload | sync_task.payload | no |  | no | Data | no |
-|  | Version of a durable intermediate task result | SyncTask | resultSchemaVersion | sync_task.result_schema_version | no |  | no | Int | no |
-|  | Integrity and reuse digest for the intermediate result | SyncTask | resultFingerprint | sync_task.result_fingerprint | yes |  | no | String | no |
-|  | Integrity-checked normalized result path beneath the account folder; mandatory before metadata.fetch completion | SyncTask | resultRelativePath | sync_task.result_relative_path | no |  | no | String | no |
-| pending | Raw workflow-state enum | SyncTask | state | sync_task.state | yes |  | yes | String | no |
-| 0 | Deterministic execution and display ordering | SyncTask | sequence | sync_task.sequence | yes |  | yes | Int64 | no |
-| 0 | Number of attempts started | SyncTask | attemptCount | sync_task.attempt_count | no |  | yes | Int | no |
-| 3 | Retry ceiling | SyncTask | maximumAttempts | sync_task.maximum_attempts | no |  | yes | Int | no |
-|  | Backoff deadline for a retryable task | SyncTask | nextAttemptAt | sync_task.next_attempt_at | yes |  | no | Date | no |
-| 0 | Task-specific completed work units | SyncTask | completedUnits | sync_task.completed_units | no |  | yes | Int64 | no |
-|  | Task-specific total when known | SyncTask | totalUnits | sync_task.total_units | no |  | no | Int64 | no |
-|  | Task creation timestamp | SyncTask | createdAt | sync_task.created_at | no |  | yes | Date | no |
-|  | Most recent start timestamp | SyncTask | startedAt | sync_task.started_at | no |  | no | Date | no |
-|  | Terminal-state timestamp | SyncTask | finishedAt | sync_task.finished_at | no |  | no | Date | no |
-| [] | Attempt history | SyncTask | attempts | sync_task.attempts | no | one-to-many; inverse=task; delete=cascade | yes | [SyncAttempt] | no |
-| [] | Dependency edges entering this task | SyncTask | prerequisites | sync_task.prerequisites | no | one-to-many; inverse=task; delete=cascade | yes | [SyncTaskDependency] | no |
-|  | Deterministic key over run stage mailbox UIDVALIDITY UID and relevant contract version | SyncTask | taskKey | sync_task.task_key | yes |  | yes | String | yes |
-|  | Current claim identifier; fence task completion by this owner and lease | SyncTask | leaseOwner | sync_task.lease_owner | yes |  | no | String | no |
-|  | Expired unfinished task claims may be reclaimed | SyncTask | leaseExpiresAt | sync_task.lease_expires_at | yes |  | no | Date | no |
-|  | Small durable page cursor saved atomically with emitted child tasks; never a UID array | SyncTask | discoveryCursor | sync_task.discovery_cursor | no |  | no | String | no |
-|  | Versioned normalized metadata projection checkpoint | SyncTask | metadataExportState | sync_task.metadata_export_state | no | one-to-one; inverse=task; delete=cascade | no | MetadataExportState | no |
-|  | Stable dependency-edge identifier | SyncTaskDependency | id | sync_task_dependency.id | yes |  | yes | UUID | yes |
-|  | Task that must wait | SyncTaskDependency | task | sync_task_dependency.task | yes | many-to-one; inverse=prerequisites | yes | SyncTask | no |
-|  | Task that must complete first; pair must be unique | SyncTaskDependency | prerequisite | sync_task_dependency.prerequisite | yes | many-to-one | yes | SyncTask | no |
-|  | Stable attempt identifier | SyncAttempt | id | sync_attempt.id | yes |  | yes | UUID | yes |
-|  | Task being attempted | SyncAttempt | task | sync_attempt.task | yes | many-to-one; inverse=attempts | yes | SyncTask | no |
-|  | Monotonic attempt number unique within a task | SyncAttempt | ordinal | sync_attempt.ordinal | no |  | yes | Int | no |
-| running | Raw attempt-state enum | SyncAttempt | state | sync_attempt.state | yes |  | yes | String | no |
-|  | Attempt start timestamp | SyncAttempt | startedAt | sync_attempt.started_at | no |  | yes | Date | no |
-|  | Attempt finish timestamp | SyncAttempt | finishedAt | sync_attempt.finished_at | no |  | no | Date | no |
-|  | Stable failure code | SyncAttempt | failureCode | sync_attempt.failure_code | yes |  | no | String | no |
-|  | Sanitized diagnostic summary | SyncAttempt | failureMessage | sync_attempt.failure_message | no |  | no | String | no |
-| false | Whether policy permits another attempt | SyncAttempt | retryable | sync_attempt.retryable | no |  | yes | Bool | no |
-|  | Stable checkpoint identifier | MailboxCheckpoint | id | mailbox_checkpoint.id | yes |  | yes | UUID | yes |
-|  | Mailbox owning the checkpoint | MailboxCheckpoint | mailbox | mailbox_checkpoint.mailbox | yes | one-to-one; inverse=checkpoint | yes | Mailbox | yes |
-|  | Current IMAP UIDVALIDITY value | MailboxCheckpoint | uidValidity | mailbox_checkpoint.uid_validity | yes |  | yes | Int64 | no |
-|  | Highest UID observed for incremental discovery | MailboxCheckpoint | highestObservedUID | mailbox_checkpoint.highest_observed_uid | no |  | no | Int64 | no |
-|  | Most recent fully committed mailbox sync | MailboxCheckpoint | lastSuccessfulSyncAt | mailbox_checkpoint.last_successful_sync_at | no |  | no | Date | no |
-| false | Whether incremental state must be rebuilt | MailboxCheckpoint | requiresReconciliation | mailbox_checkpoint.requires_reconciliation | yes |  | yes | Bool | no |
-|  | Last checkpoint mutation timestamp | MailboxCheckpoint | updatedAt | mailbox_checkpoint.updated_at | no |  | yes | Date | no |
-|  | Stable completed-range checkpoint identifier | SyncPeriodCheckpoint | id | period_checkpoint.id | yes |  | yes | UUID | yes |
-|  | Deterministic account mailbox UIDVALIDITY periodStart periodEndExclusive key | SyncPeriodCheckpoint | scopeKey | period_checkpoint.scope_key | yes |  | yes | String | yes |
-|  | Owning account; encode UUID as canonical string at the API boundary | SyncPeriodCheckpoint | accountID | period_checkpoint.account_id | yes |  | yes | UUID | no |
-|  | Covered mailbox | SyncPeriodCheckpoint | mailboxID | period_checkpoint.mailbox_id | yes |  | yes | UUID | no |
-|  | Mailbox generation covered by the completed range | SyncPeriodCheckpoint | uidValidity | period_checkpoint.uid_validity | no |  | yes | Int64 | no |
-|  | Inclusive UTC coverage boundary | SyncPeriodCheckpoint | periodStart | period_checkpoint.period_start | no |  | yes | Date | no |
-|  | Exclusive UTC coverage boundary | SyncPeriodCheckpoint | periodEndExclusive | period_checkpoint.period_end_exclusive | no |  | yes | Date | no |
-|  | Last successfully completed run for this scope | SyncPeriodCheckpoint | runID | period_checkpoint.run_id | no |  | yes | UUID | no |
-|  | Last verified completion timestamp | SyncPeriodCheckpoint | completedAt | period_checkpoint.completed_at | no |  | yes | Date | no |
-|  | Stable fetch identifier | FetchOperation | id | fetch_operation.id | yes |  | yes | UUID | yes |
-|  | Owning account | FetchOperation | account | fetch_operation.account | yes | many-to-one; inverse=fetchOperations | yes | Account | no |
-|  | Mailbox containing the message | FetchOperation | mailbox | fetch_operation.mailbox | yes | many-to-one | yes | Mailbox | no |
-|  | UIDVALIDITY captured when requested | FetchOperation | uidValidity | fetch_operation.uid_validity | yes |  | yes | Int64 | no |
-|  | Stable mailbox-local message UID | FetchOperation | uid | fetch_operation.uid | yes |  | yes | Int64 | no |
-|  | Raw content-selection enum | FetchOperation | selectionKind | fetch_operation.selection_kind | yes |  | yes | String | no |
-| [] | Requested MIME part identifiers | FetchOperation | selectedPartIDs | fetch_operation.selected_part_ids | no |  | yes | [String] | no |
-| none | Raw transform enum | FetchOperation | transformKind | fetch_operation.transform_kind | no |  | yes | String | no |
-|  | Raw retention enum | FetchOperation | retentionKind | fetch_operation.retention_kind | no |  | yes | String | no |
-|  | TTL when retention kind is time-to-live | FetchOperation | retentionSeconds | fetch_operation.retention_seconds | no |  | no | Int64 | no |
-|  | Optional transfer limit | FetchOperation | maximumBytes | fetch_operation.maximum_bytes | no |  | no | Int64 | no |
-| pending | Raw fetch-state enum | FetchOperation | state | fetch_operation.state | yes |  | yes | String | no |
-| 0 | Downloaded bytes so far | FetchOperation | receivedBytes | fetch_operation.received_bytes | no |  | yes | Int64 | no |
-|  | Expected bytes when known | FetchOperation | expectedBytes | fetch_operation.expected_bytes | no |  | no | Int64 | no |
-|  | Stable failure code | FetchOperation | failureCode | fetch_operation.failure_code | yes |  | no | String | no |
-|  | Sanitized failure summary | FetchOperation | failureMessage | fetch_operation.failure_message | no |  | no | String | no |
-|  | Fetch creation timestamp | FetchOperation | createdAt | fetch_operation.created_at | no |  | yes | Date | no |
-|  | Fetch start timestamp | FetchOperation | startedAt | fetch_operation.started_at | no |  | no | Date | no |
-|  | Terminal-state timestamp | FetchOperation | finishedAt | fetch_operation.finished_at | no |  | no | Date | no |
-|  | Lease created after successful publication | FetchOperation | lease | fetch_operation.lease | no | one-to-one; inverse=fetchOperation; delete=cascade | no | ContentLease | yes |
-|  | Versioned Codable complete FetchEmailRequest including body preference inline resources part selection and transform output; no body bytes or secrets | FetchOperation | requestPayload | fetch_operation.request_payload | no |  | yes | Data | no |
-| 1 | Schema version of requestPayload | FetchOperation | requestVersion | fetch_operation.request_version | no |  | yes | Int | no |
-| connecting | connecting downloading processing or publishing; matches FetchProgress.phase | FetchOperation | progressPhase | fetch_operation.progress_phase | no |  | yes | String | no |
-| false | Retryability of the latest fetch failure | FetchOperation | failureRetryable | fetch_operation.failure_retryable | no |  | yes | Bool | no |
-|  | Stable lease identifier | ContentLease | id | content_lease.id | yes |  | yes | UUID | yes |
-|  | Fetch operation that produced the content | ContentLease | fetchOperation | content_lease.fetch_operation | yes | one-to-one; inverse=lease | yes | FetchOperation | yes |
-|  | TTL expiry from successful publication; absent for while-in-use retention, which ends with release or owner-session shutdown | ContentLease | expiresAt | content_lease.expires_at | yes |  | no | Date | no |
-|  | Explicit release timestamp | ContentLease | releasedAt | content_lease.released_at | yes |  | no | Date | no |
-|  | Lease creation timestamp | ContentLease | createdAt | content_lease.created_at | no |  | yes | Date | no |
-| [] | Published temporary artifacts | ContentLease | artifacts | content_lease.artifacts | no | one-to-many; inverse=lease; delete=cascade | yes | [TemporaryArtifact] | no |
-|  | Process session owning a while-in-use lease; prior-session while-in-use leases are released on recovery | ContentLease | ownerSessionID | content_lease.owner_session_id | yes |  | yes | String | no |
-|  | Stable artifact identifier | TemporaryArtifact | id | temporary_artifact.id | yes |  | yes | UUID | yes |
-|  | Owning content lease | TemporaryArtifact | lease | temporary_artifact.lease | yes | many-to-one; inverse=artifacts | yes | ContentLease | no |
-|  | Raw artifact-role enum | TemporaryArtifact | role | temporary_artifact.role | yes |  | yes | String | no |
-|  | Normalized MIME type/subtype string; parameters are stored separately | TemporaryArtifact | mimeType | temporary_artifact.mime_type | no |  | yes | String | no |
-|  | Sanitized suggested filename | TemporaryArtifact | filename | temporary_artifact.filename | no |  | no | String | no |
-|  | Published file size | TemporaryArtifact | byteCount | temporary_artifact.byte_count | no |  | yes | Int64 | no |
-|  | Path relative to the account temporary-content folder | TemporaryArtifact | relativePath | temporary_artifact.relative_path | yes |  | yes | String | yes |
-|  | IMAP MIME section identifier | TemporaryArtifact | partID | temporary_artifact.part_id | no |  | no | String | no |
-|  | MIME Content-ID for inline resources | TemporaryArtifact | contentID | temporary_artifact.content_id | no |  | no | String | no |
-|  | Optional integrity digest | TemporaryArtifact | sha256 | temporary_artifact.sha256 | no |  | no | String | no |
-|  | Artifact publication timestamp | TemporaryArtifact | createdAt | temporary_artifact.created_at | no |  | yes | Date | no |
-| {} | Versioned canonical JSON string map retaining MIMEType.parameters | TemporaryArtifact | mimeParameters | temporary_artifact.mime_parameters | no |  | yes | Data | no |
+| default_value | description | entity | field | field_id | indexed | logical_type | relationship | required | sqlite_storage | unique |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+|  | Stable local account identifier | Account | id | account.id | yes | UUID |  | yes | TEXT | yes |
+|  | User-visible account name | Account | displayName | account.display_name | no | String |  | yes | TEXT | no |
+|  | Normalized primary email address | Account | emailAddress | account.email_address | yes | String |  | yes | TEXT | no |
+| imap | Raw provider enum such as gmail or imap | Account | providerKind | account.provider_kind | no | String |  | yes | TEXT | no |
+|  | IMAP server hostname | Account | imapHost | account.imap_host | no | String |  | yes | TEXT | no |
+| 993 | IMAP server port | Account | imapPort | account.imap_port | no | Int |  | yes | INTEGER | no |
+| tls | Raw transport-security enum | Account | transportSecurity | account.transport_security | no | String |  | yes | TEXT | no |
+|  | Optional non-secret configured identity; authentication username is supplied explicitly and must match when configured | Account | username | account.username | no | String |  | no | TEXT | no |
+|  | Stable filesystem subfolder name such as account1 | Account | folderName | account.folder_name | yes | String |  | yes | TEXT | yes |
+| 1 | Whether scheduled and manual sync may run | Account | isEnabled | account.is_enabled | yes | Bool |  | yes | INTEGER | no |
+|  | Creation timestamp | Account | createdAt | account.created_at | no | Date |  | yes | INTEGER UTC Unix milliseconds | no |
+|  | Last configuration-change timestamp | Account | updatedAt | account.updated_at | no | Date |  | yes | INTEGER UTC Unix milliseconds | no |
+| [] | Known mailboxes for this account | Account | mailboxes | account.mailboxes | no | [Mailbox] | one-to-many; inverse=account; delete=cascade | yes | Foreign key or inverse/join table; no serialized object graph | no |
+| [] | Durable sync plans owned by this account | Account | syncPlans | account.sync_plans | no | [SyncPlan] | one-to-many; inverse=account; delete=cascade | yes | Foreign key or inverse/join table; no serialized object graph | no |
+| [] | On-demand fetch operations owned by this account | Account | fetchOperations | account.fetch_operations | no | [FetchOperation] | one-to-many; inverse=account; delete=cascade | yes | Foreign key or inverse/join table; no serialized object graph | no |
+|  | Stable local mailbox identifier | Mailbox | id | mailbox.id | yes | UUID |  | yes | TEXT | yes |
+|  | Owning account | Mailbox | account | mailbox.account | yes | Account | many-to-one; inverse=mailboxes | yes | Foreign key or inverse/join table; no serialized object graph | no |
+|  | Exact server mailbox name; unique within an account | Mailbox | serverName | mailbox.server_name | yes | String |  | yes | TEXT | no |
+|  | Decoded user-visible mailbox name | Mailbox | displayName | mailbox.display_name | no | String |  | yes | TEXT | no |
+|  | Server hierarchy delimiter when advertised | Mailbox | delimiter | mailbox.delimiter | no | String |  | no | TEXT | no |
+| [] | Normalized IMAP mailbox attributes | Mailbox | attributes | mailbox.attributes | no | [String] |  | yes | Foreign key or inverse/join table; no serialized object graph | no |
+| 1 | Whether the mailbox may be selected | Mailbox | isSelectable | mailbox.is_selectable | no | Bool |  | yes | INTEGER | no |
+|  | First discovery timestamp | Mailbox | discoveredAt | mailbox.discovered_at | no | Date |  | yes | INTEGER UTC Unix milliseconds | no |
+|  | Last discovery or attribute-update timestamp | Mailbox | updatedAt | mailbox.updated_at | no | Date |  | yes | INTEGER UTC Unix milliseconds | no |
+|  | Durable incremental-sync cursor | Mailbox | checkpoint | mailbox.checkpoint | no | MailboxCheckpoint | one-to-one; inverse=mailbox; delete=cascade | no | Foreign key or inverse/join table; no serialized object graph | yes |
+|  | Stable plan identifier | SyncPlan | id | sync_plan.id | yes | UUID |  | yes | TEXT | yes |
+|  | Account to synchronize | SyncPlan | account | sync_plan.account | yes | Account | many-to-one; inverse=syncPlans | yes | Foreign key or inverse/join table; no serialized object graph | no |
+|  | Raw mode enum: initial incremental or reconcile | SyncPlan | mode | sync_plan.mode | yes | String |  | yes | TEXT | no |
+| calendar-month | Raw period enum: calendar-month or date-range, matching the API discriminators | SyncPlan | periodKind | sync_plan.period_kind | no | String |  | yes | TEXT | no |
+|  | Inclusive UTC period boundary | SyncPlan | periodStart | sync_plan.period_start | yes | Date |  | yes | INTEGER UTC Unix milliseconds | no |
+|  | Exclusive UTC period boundary | SyncPlan | periodEndExclusive | sync_plan.period_end_exclusive | yes | Date |  | yes | INTEGER UTC Unix milliseconds | no |
+|  | YYYY-MM when the plan covers exactly one UTC calendar month | SyncPlan | partitionMonth | sync_plan.partition_month | yes | String |  | no | TEXT | no |
+| 1 | Invariant preventing content downloads during sync | SyncPlan | metadataOnly | sync_plan.metadata_only | no | Bool |  | yes | INTEGER | no |
+| ready | Raw state enum: ready or superseded | SyncPlan | state | sync_plan.state | yes | String |  | yes | TEXT | no |
+|  | Plan creation timestamp | SyncPlan | createdAt | sync_plan.created_at | no | Date |  | yes | INTEGER UTC Unix milliseconds | no |
+| [] | Empty means all; include selection must contain at least one unique mailbox ID owned by this account | SyncPlan | mailboxSelections | sync_plan.mailbox_selections | no | [SyncPlanMailbox] | one-to-many; inverse=plan; delete=cascade | yes | Foreign key or inverse/join table; no serialized object graph | no |
+| [] | Execution history for the plan | SyncPlan | runs | sync_plan.runs | no | [SyncRun] | one-to-many; inverse=plan; delete=cascade | yes | Foreign key or inverse/join table; no serialized object graph | no |
+|  | Stable selection-row identifier | SyncPlanMailbox | id | sync_plan_mailbox.id | yes | UUID |  | yes | TEXT | yes |
+|  | Owning plan | SyncPlanMailbox | plan | sync_plan_mailbox.plan | yes | SyncPlan | many-to-one; inverse=mailboxSelections | yes | Foreign key or inverse/join table; no serialized object graph | no |
+|  | Selected mailbox; unique with plan | SyncPlanMailbox | mailbox | sync_plan_mailbox.mailbox | yes | Mailbox | many-to-one | yes | Foreign key or inverse/join table; no serialized object graph | no |
+|  | Stable run identifier | SyncRun | id | sync_run.id | yes | UUID |  | yes | TEXT | yes |
+|  | Plan being executed | SyncRun | plan | sync_run.plan | yes | SyncPlan | many-to-one; inverse=runs | yes | Foreign key or inverse/join table; no serialized object graph | no |
+| pending | Raw workflow-state enum | SyncRun | state | sync_run.state | yes | String |  | yes | TEXT | no |
+| 0 | Completed task count | SyncRun | completedTasks | sync_run.completed_tasks | no | Int64 |  | yes | INTEGER | no |
+| 0 | Total planned task count | SyncRun | totalTasks | sync_run.total_tasks | no | Int64 |  | yes | INTEGER | no |
+| 0 | Messages discovered during this run | SyncRun | discoveredMessages | sync_run.discovered_messages | no | Int64 |  | yes | INTEGER | no |
+| 0 | Metadata records fetched from IMAP | SyncRun | fetchedMetadataRecords | sync_run.fetched_metadata_records | no | Int64 |  | yes | INTEGER | no |
+| 0 | Metadata records upserted into the DuckDB live store | SyncRun | updatedMetadataRecords | sync_run.updated_metadata_records | no | Int64 |  | yes | INTEGER | no |
+| 0 | Metadata records removed during reconciliation | SyncRun | removedMetadataRecords | sync_run.removed_metadata_records | no | Int64 |  | yes | INTEGER | no |
+| 0 | Messages whose required transformation pipeline completed | SyncRun | processedMessages | sync_run.processed_messages | no | Int64 |  | yes | INTEGER | no |
+| 0 | Stable transformation results acknowledged in DuckDB | SyncRun | exportedProcessingResults | sync_run.exported_processing_results | no | Int64 |  | yes | INTEGER | no |
+| 0 | DuckDB rows verified and published to Parquet | SyncRun | archivedRecords | sync_run.archived_records | no | Int64 |  | yes | INTEGER | no |
+|  | Raw blocking-reason enum | SyncRun | blockingKind | sync_run.blocking_kind | yes | String |  | no | TEXT | no |
+|  | Non-secret diagnostic detail | SyncRun | blockingDetail | sync_run.blocking_detail | no | String |  | no | TEXT | no |
+|  | Stable failure code | SyncRun | failureCode | sync_run.failure_code | yes | String |  | no | TEXT | no |
+|  | Sanitized failure summary without message content or credentials | SyncRun | failureMessage | sync_run.failure_message | no | String |  | no | TEXT | no |
+|  | Run creation timestamp | SyncRun | createdAt | sync_run.created_at | no | Date |  | yes | INTEGER UTC Unix milliseconds | no |
+|  | First start timestamp | SyncRun | startedAt | sync_run.started_at | no | Date |  | no | INTEGER UTC Unix milliseconds | no |
+|  | Terminal-state timestamp | SyncRun | finishedAt | sync_run.finished_at | no | Date |  | no | INTEGER UTC Unix milliseconds | no |
+| [] | Durable task graph for this run | SyncRun | tasks | sync_run.tasks | no | [SyncTask] | one-to-many; inverse=run; delete=cascade | yes | Foreign key or inverse/join table; no serialized object graph | no |
+| 0 | Retryability of the latest run failure | SyncRun | failureRetryable | sync_run.failure_retryable | no | Bool |  | yes | INTEGER | no |
+|  | Stable task identifier | SyncTask | id | sync_task.id | yes | UUID |  | yes | TEXT | yes |
+|  | Owning run | SyncTask | run | sync_task.run | yes | SyncRun | many-to-one; inverse=tasks | yes | Foreign key or inverse/join table; no serialized object graph | no |
+|  | Mailbox scope when applicable | SyncTask | mailbox | sync_task.mailbox | yes | Mailbox | many-to-one | no | Foreign key or inverse/join table; no serialized object graph | no |
+|  | Stable task-kind identifier | SyncTask | kind | sync_task.kind | yes | String |  | yes | TEXT | no |
+|  | Stable period-workflow stage identifier | SyncTask | stage | sync_task.stage | yes | String |  | yes | TEXT | no |
+|  | Message UIDVALIDITY for per-email tasks | SyncTask | uidValidity | sync_task.uid_validity | yes | Int64 |  | no | INTEGER | no |
+|  | Message IMAP UID for per-email tasks | SyncTask | emailUID | sync_task.email_uid | yes | Int64 |  | no | INTEGER | no |
+|  | Linked EmailProcessingJob identifier for transformation tasks | SyncTask | processingJobID | sync_task.processing_job_id | yes | UUID |  | no | TEXT | no |
+|  | Linked SQLite to DuckDB export batch | SyncTask | exportBatchID | sync_task.export_batch_id | yes | UUID |  | no | TEXT | no |
+|  | Linked DuckDB to Parquet archive batch | SyncTask | archiveBatchID | sync_task.archive_batch_id | yes | UUID |  | no | TEXT | no |
+| 1 | Schema version for the task payload | SyncTask | payloadVersion | sync_task.payload_version | no | Int |  | yes | INTEGER | no |
+|  | Small versioned JSON parameters; never message content or credentials | SyncTask | payload | sync_task.payload | no | JSON |  | no | TEXT (validated JSON) | no |
+|  | Version of a durable intermediate task result | SyncTask | resultSchemaVersion | sync_task.result_schema_version | no | Int |  | no | INTEGER | no |
+|  | Integrity and reuse digest for the intermediate result | SyncTask | resultFingerprint | sync_task.result_fingerprint | yes | String |  | no | TEXT | no |
+|  | Integrity-checked normalized result path beneath the account folder; mandatory before metadata.fetch completion | SyncTask | resultRelativePath | sync_task.result_relative_path | no | String |  | no | TEXT | no |
+| pending | Raw workflow-state enum | SyncTask | state | sync_task.state | yes | String |  | yes | TEXT | no |
+| 0 | Deterministic execution and display ordering | SyncTask | sequence | sync_task.sequence | yes | Int64 |  | yes | INTEGER | no |
+| 0 | Number of attempts started | SyncTask | attemptCount | sync_task.attempt_count | no | Int |  | yes | INTEGER | no |
+| 3 | Retry ceiling | SyncTask | maximumAttempts | sync_task.maximum_attempts | no | Int |  | yes | INTEGER | no |
+|  | Backoff deadline for a retryable task | SyncTask | nextAttemptAt | sync_task.next_attempt_at | yes | Date |  | no | INTEGER UTC Unix milliseconds | no |
+| 0 | Task-specific completed work units | SyncTask | completedUnits | sync_task.completed_units | no | Int64 |  | yes | INTEGER | no |
+|  | Task-specific total when known | SyncTask | totalUnits | sync_task.total_units | no | Int64 |  | no | INTEGER | no |
+|  | Task creation timestamp | SyncTask | createdAt | sync_task.created_at | no | Date |  | yes | INTEGER UTC Unix milliseconds | no |
+|  | Most recent start timestamp | SyncTask | startedAt | sync_task.started_at | no | Date |  | no | INTEGER UTC Unix milliseconds | no |
+|  | Terminal-state timestamp | SyncTask | finishedAt | sync_task.finished_at | no | Date |  | no | INTEGER UTC Unix milliseconds | no |
+| [] | Attempt history | SyncTask | attempts | sync_task.attempts | no | [SyncAttempt] | one-to-many; inverse=task; delete=cascade | yes | Foreign key or inverse/join table; no serialized object graph | no |
+| [] | Dependency edges entering this task | SyncTask | prerequisites | sync_task.prerequisites | no | [SyncTaskDependency] | one-to-many; inverse=task; delete=cascade | yes | Foreign key or inverse/join table; no serialized object graph | no |
+|  | Deterministic key over run stage mailbox UIDVALIDITY UID and relevant contract version | SyncTask | taskKey | sync_task.task_key | yes | String |  | yes | TEXT | yes |
+|  | Current claim identifier; fence task completion by this owner and lease | SyncTask | leaseOwner | sync_task.lease_owner | yes | String |  | no | TEXT | no |
+|  | Expired unfinished task claims may be reclaimed | SyncTask | leaseExpiresAt | sync_task.lease_expires_at | yes | Date |  | no | INTEGER UTC Unix milliseconds | no |
+|  | Small durable page cursor saved atomically with emitted child tasks; never a UID array | SyncTask | discoveryCursor | sync_task.discovery_cursor | no | String |  | no | TEXT | no |
+|  | Versioned normalized metadata projection checkpoint | SyncTask | metadataExportState | sync_task.metadata_export_state | no | MetadataExportState | one-to-one; inverse=task; delete=cascade | no | Foreign key or inverse/join table; no serialized object graph | no |
+|  | Stable dependency-edge identifier | SyncTaskDependency | id | sync_task_dependency.id | yes | UUID |  | yes | TEXT | yes |
+|  | Task that must wait | SyncTaskDependency | task | sync_task_dependency.task | yes | SyncTask | many-to-one; inverse=prerequisites | yes | Foreign key or inverse/join table; no serialized object graph | no |
+|  | Task that must complete first; pair must be unique | SyncTaskDependency | prerequisite | sync_task_dependency.prerequisite | yes | SyncTask | many-to-one | yes | Foreign key or inverse/join table; no serialized object graph | no |
+|  | Stable attempt identifier | SyncAttempt | id | sync_attempt.id | yes | UUID |  | yes | TEXT | yes |
+|  | Task being attempted | SyncAttempt | task | sync_attempt.task | yes | SyncTask | many-to-one; inverse=attempts | yes | Foreign key or inverse/join table; no serialized object graph | no |
+|  | Monotonic attempt number unique within a task | SyncAttempt | ordinal | sync_attempt.ordinal | no | Int |  | yes | INTEGER | no |
+| running | Raw attempt-state enum | SyncAttempt | state | sync_attempt.state | yes | String |  | yes | TEXT | no |
+|  | Attempt start timestamp | SyncAttempt | startedAt | sync_attempt.started_at | no | Date |  | yes | INTEGER UTC Unix milliseconds | no |
+|  | Attempt finish timestamp | SyncAttempt | finishedAt | sync_attempt.finished_at | no | Date |  | no | INTEGER UTC Unix milliseconds | no |
+|  | Stable failure code | SyncAttempt | failureCode | sync_attempt.failure_code | yes | String |  | no | TEXT | no |
+|  | Sanitized diagnostic summary | SyncAttempt | failureMessage | sync_attempt.failure_message | no | String |  | no | TEXT | no |
+| 0 | Whether policy permits another attempt | SyncAttempt | retryable | sync_attempt.retryable | no | Bool |  | yes | INTEGER | no |
+|  | Stable checkpoint identifier | MailboxCheckpoint | id | mailbox_checkpoint.id | yes | UUID |  | yes | TEXT | yes |
+|  | Mailbox owning the checkpoint | MailboxCheckpoint | mailbox | mailbox_checkpoint.mailbox | yes | Mailbox | one-to-one; inverse=checkpoint | yes | Foreign key or inverse/join table; no serialized object graph | yes |
+|  | Current IMAP UIDVALIDITY value | MailboxCheckpoint | uidValidity | mailbox_checkpoint.uid_validity | yes | Int64 |  | yes | INTEGER | no |
+|  | Highest UID observed for incremental discovery | MailboxCheckpoint | highestObservedUID | mailbox_checkpoint.highest_observed_uid | no | Int64 |  | no | INTEGER | no |
+|  | Most recent fully committed mailbox sync | MailboxCheckpoint | lastSuccessfulSyncAt | mailbox_checkpoint.last_successful_sync_at | no | Date |  | no | INTEGER UTC Unix milliseconds | no |
+| 0 | Whether incremental state must be rebuilt | MailboxCheckpoint | requiresReconciliation | mailbox_checkpoint.requires_reconciliation | yes | Bool |  | yes | INTEGER | no |
+|  | Last checkpoint mutation timestamp | MailboxCheckpoint | updatedAt | mailbox_checkpoint.updated_at | no | Date |  | yes | INTEGER UTC Unix milliseconds | no |
+|  | Stable completed-range checkpoint identifier | SyncPeriodCheckpoint | id | period_checkpoint.id | yes | UUID |  | yes | TEXT | yes |
+|  | Deterministic account mailbox UIDVALIDITY periodStart periodEndExclusive key | SyncPeriodCheckpoint | scopeKey | period_checkpoint.scope_key | yes | String |  | yes | TEXT | yes |
+|  | Owning account; encode UUID as canonical string at the API boundary | SyncPeriodCheckpoint | accountID | period_checkpoint.account_id | yes | UUID |  | yes | TEXT | no |
+|  | Covered mailbox | SyncPeriodCheckpoint | mailboxID | period_checkpoint.mailbox_id | yes | UUID |  | yes | TEXT | no |
+|  | Mailbox generation covered by the completed range | SyncPeriodCheckpoint | uidValidity | period_checkpoint.uid_validity | no | Int64 |  | yes | INTEGER | no |
+|  | Inclusive UTC coverage boundary | SyncPeriodCheckpoint | periodStart | period_checkpoint.period_start | no | Date |  | yes | INTEGER UTC Unix milliseconds | no |
+|  | Exclusive UTC coverage boundary | SyncPeriodCheckpoint | periodEndExclusive | period_checkpoint.period_end_exclusive | no | Date |  | yes | INTEGER UTC Unix milliseconds | no |
+|  | Last successfully completed run for this scope | SyncPeriodCheckpoint | runID | period_checkpoint.run_id | no | UUID |  | yes | TEXT | no |
+|  | Last verified completion timestamp | SyncPeriodCheckpoint | completedAt | period_checkpoint.completed_at | no | Date |  | yes | INTEGER UTC Unix milliseconds | no |
+|  | Stable fetch identifier | FetchOperation | id | fetch_operation.id | yes | UUID |  | yes | TEXT | yes |
+|  | Owning account | FetchOperation | account | fetch_operation.account | yes | Account | many-to-one; inverse=fetchOperations | yes | Foreign key or inverse/join table; no serialized object graph | no |
+|  | Mailbox containing the message | FetchOperation | mailbox | fetch_operation.mailbox | yes | Mailbox | many-to-one | yes | Foreign key or inverse/join table; no serialized object graph | no |
+|  | UIDVALIDITY captured when requested | FetchOperation | uidValidity | fetch_operation.uid_validity | yes | Int64 |  | yes | INTEGER | no |
+|  | Stable mailbox-local message UID | FetchOperation | uid | fetch_operation.uid | yes | Int64 |  | yes | INTEGER | no |
+|  | Raw content-selection enum | FetchOperation | selectionKind | fetch_operation.selection_kind | yes | String |  | yes | TEXT | no |
+| [] | Requested MIME part identifiers | FetchOperation | selectedPartIDs | fetch_operation.selected_part_ids | no | [String] |  | yes | Foreign key or inverse/join table; no serialized object graph | no |
+| none | Raw transform enum | FetchOperation | transformKind | fetch_operation.transform_kind | no | String |  | yes | TEXT | no |
+|  | Raw retention enum | FetchOperation | retentionKind | fetch_operation.retention_kind | no | String |  | yes | TEXT | no |
+|  | TTL when retention kind is time-to-live | FetchOperation | retentionSeconds | fetch_operation.retention_seconds | no | Int64 |  | no | INTEGER | no |
+|  | Optional transfer limit | FetchOperation | maximumBytes | fetch_operation.maximum_bytes | no | Int64 |  | no | INTEGER | no |
+| pending | Raw fetch-state enum | FetchOperation | state | fetch_operation.state | yes | String |  | yes | TEXT | no |
+| 0 | Downloaded bytes so far | FetchOperation | receivedBytes | fetch_operation.received_bytes | no | Int64 |  | yes | INTEGER | no |
+|  | Expected bytes when known | FetchOperation | expectedBytes | fetch_operation.expected_bytes | no | Int64 |  | no | INTEGER | no |
+|  | Stable failure code | FetchOperation | failureCode | fetch_operation.failure_code | yes | String |  | no | TEXT | no |
+|  | Sanitized failure summary | FetchOperation | failureMessage | fetch_operation.failure_message | no | String |  | no | TEXT | no |
+|  | Fetch creation timestamp | FetchOperation | createdAt | fetch_operation.created_at | no | Date |  | yes | INTEGER UTC Unix milliseconds | no |
+|  | Fetch start timestamp | FetchOperation | startedAt | fetch_operation.started_at | no | Date |  | no | INTEGER UTC Unix milliseconds | no |
+|  | Terminal-state timestamp | FetchOperation | finishedAt | fetch_operation.finished_at | no | Date |  | no | INTEGER UTC Unix milliseconds | no |
+|  | Lease created after successful publication | FetchOperation | lease | fetch_operation.lease | no | ContentLease | one-to-one; inverse=fetchOperation; delete=cascade | no | Foreign key or inverse/join table; no serialized object graph | yes |
+|  | Versioned JSON complete FetchEmailRequest including body preference inline resources part selection and transform output; no body bytes or secrets | FetchOperation | requestPayload | fetch_operation.request_payload | no | JSON |  | yes | TEXT (validated JSON) | no |
+| 1 | Schema version of requestPayload | FetchOperation | requestVersion | fetch_operation.request_version | no | Int |  | yes | INTEGER | no |
+| connecting | connecting downloading processing or publishing; matches FetchProgress.phase | FetchOperation | progressPhase | fetch_operation.progress_phase | no | String |  | yes | TEXT | no |
+| 0 | Retryability of the latest fetch failure | FetchOperation | failureRetryable | fetch_operation.failure_retryable | no | Bool |  | yes | INTEGER | no |
+|  | Stable lease identifier | ContentLease | id | content_lease.id | yes | UUID |  | yes | TEXT | yes |
+|  | Fetch operation that produced the content | ContentLease | fetchOperation | content_lease.fetch_operation | yes | FetchOperation | one-to-one; inverse=lease | yes | Foreign key or inverse/join table; no serialized object graph | yes |
+|  | TTL expiry from successful publication; absent for while-in-use retention, which ends with release or owner-session shutdown | ContentLease | expiresAt | content_lease.expires_at | yes | Date |  | no | INTEGER UTC Unix milliseconds | no |
+|  | Explicit release timestamp | ContentLease | releasedAt | content_lease.released_at | yes | Date |  | no | INTEGER UTC Unix milliseconds | no |
+|  | Lease creation timestamp | ContentLease | createdAt | content_lease.created_at | no | Date |  | yes | INTEGER UTC Unix milliseconds | no |
+| [] | Published temporary artifacts | ContentLease | artifacts | content_lease.artifacts | no | [TemporaryArtifact] | one-to-many; inverse=lease; delete=cascade | yes | Foreign key or inverse/join table; no serialized object graph | no |
+|  | Process session owning a while-in-use lease; prior-session while-in-use leases are released on recovery | ContentLease | ownerSessionID | content_lease.owner_session_id | yes | String |  | yes | TEXT | no |
+|  | Stable artifact identifier | TemporaryArtifact | id | temporary_artifact.id | yes | UUID |  | yes | TEXT | yes |
+|  | Owning content lease | TemporaryArtifact | lease | temporary_artifact.lease | yes | ContentLease | many-to-one; inverse=artifacts | yes | Foreign key or inverse/join table; no serialized object graph | no |
+|  | Raw artifact-role enum | TemporaryArtifact | role | temporary_artifact.role | yes | String |  | yes | TEXT | no |
+|  | Normalized MIME type/subtype string; parameters are stored separately | TemporaryArtifact | mimeType | temporary_artifact.mime_type | no | String |  | yes | TEXT | no |
+|  | Sanitized suggested filename | TemporaryArtifact | filename | temporary_artifact.filename | no | String |  | no | TEXT | no |
+|  | Published file size | TemporaryArtifact | byteCount | temporary_artifact.byte_count | no | Int64 |  | yes | INTEGER | no |
+|  | Path relative to the account temporary-content folder | TemporaryArtifact | relativePath | temporary_artifact.relative_path | yes | String |  | yes | TEXT | yes |
+|  | IMAP MIME section identifier | TemporaryArtifact | partID | temporary_artifact.part_id | no | String |  | no | TEXT | no |
+|  | MIME Content-ID for inline resources | TemporaryArtifact | contentID | temporary_artifact.content_id | no | String |  | no | TEXT | no |
+|  | Optional integrity digest | TemporaryArtifact | sha256 | temporary_artifact.sha256 | no | String |  | no | TEXT | no |
+|  | Artifact publication timestamp | TemporaryArtifact | createdAt | temporary_artifact.created_at | no | Date |  | yes | INTEGER UTC Unix milliseconds | no |
+| {} | Versioned canonical JSON string map retaining MIMEType.parameters | TemporaryArtifact | mimeParameters | temporary_artifact.mime_parameters | no | JSON |  | yes | TEXT (validated JSON) | no |
 
 ### 06 Sync API Contract
 
@@ -889,8 +1060,8 @@ Planning, execution, resumption, cancellation, checkpoints, and progress events.
  * Language-neutral design reference for the SeleneTide sync API.
  *
  * TypeScript is used to make the contract concise. The production library will
- * expose equivalent Swift Sendable values, async functions, AsyncSequence
- * progress events, and cooperative cancellation.
+ * use owned Rust values and session-owned workers. Promise and AsyncIterable
+ * denote host-adapter conveniences over operation IDs and event polling at the C ABI.
  */
 
 /** Canonical string encodings of local UUIDs, distinct from provider IDs. */
@@ -994,7 +1165,7 @@ export interface SyncProgress {
   archivedRecords: number;
 }
 
-/** Public snapshot backed by the offline Core Data workflow store. */
+/** Public snapshot backed by the offline SQLite workflow store. */
 export interface SyncRunSnapshot {
   runID: SyncRunID;
   planID: SyncPlanID;
@@ -1105,9 +1276,9 @@ export interface StartSyncOptions {
 /**
  * Primary sync boundary.
  *
- * Planning and execution are separate so the CLI or an app can inspect work
+ * Planning and execution are separate so a frontend backend can inspect work
  * before starting it. Plans, runs, tasks, attempts, and checkpoints survive
- * process termination in the offline Core Data store. Open-month and arbitrary
+ * process termination in the offline SQLite store. Open-month and arbitrary
  * date-range plans complete after DuckDB verification; only complete closed
  * month plans instantiate archive stages.
  */
@@ -1254,8 +1425,8 @@ Core columns, extensions, normalization, and compatible DuckDB/Parquet types. So
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Schema | schema.version | schema_version | Schema version used to decode and migrate the row | INTEGER | Start at 1 and increment only for incompatible evolution | no | INT32 | core_column | Local |
 | Schema | extensions.values | extensions | Stable envelope for provider-specific customer-specific and evolving metadata | JSON | Use an empty object or map when absent; keys are extension_key column_name values and values use canonical JSON encoding | no | MAP<STRING (UTF8), STRING (UTF8)> | core_column | Local |
-| Identity | identity.account_id | account_id | Stable Core Data account UUID | VARCHAR | Part of both the mailbox-location key and provider correlation keys | no | STRING (UTF8) | core_column | Local |
-| Identity | identity.mailbox_id | mailbox_id | Stable Core Data mailbox UUID | VARCHAR | The mailbox-location key is account_id, mailbox_id, uid_validity, and uid | no | STRING (UTF8) | core_column | Local |
+| Identity | identity.account_id | account_id | Stable SQLite account UUID | VARCHAR | Part of both the mailbox-location key and provider correlation keys | no | STRING (UTF8) | core_column | Local |
+| Identity | identity.mailbox_id | mailbox_id | Stable SQLite mailbox UUID | VARCHAR | The mailbox-location key is account_id, mailbox_id, uid_validity, and uid | no | STRING (UTF8) | core_column | Local |
 | Identity | identity.mailbox_name | mailbox_name | IMAP mailbox name captured when the row is written | VARCHAR | Useful when files are inspected without the model store | no | STRING (UTF8) | core_column | Local |
 | Identity | identity.uid_validity | uid_validity | IMAP UIDVALIDITY for the containing mailbox | BIGINT | Part of the durable message identity | no | INT64 | core_column | UIDVALIDITY |
 | Identity | identity.uid | uid | Mailbox-local stable IMAP UID | BIGINT | Sequence number is intentionally excluded because it is transient | no | INT64 | core_column | UID |
@@ -1330,11 +1501,11 @@ Core columns, extensions, normalization, and compatible DuckDB/Parquet types. So
 | Derived | derived.flagged_status | is_flagged | Whether FLAGS contains Flagged | BOOLEAN | Useful for measuring user-marked importance | no | BOOLEAN | core_column | FLAGS |
 | Derived | derived.bulk_signal | bulk_classification | Documented classification from list and automation headers | VARCHAR | Use a versioned deterministic classifier | yes | STRING (UTF8) | core_column | Derived mailing-list/bulk signal |
 | Derived | derived.bulk_signal_version | bulk_classification_version | Version of the bulk-classification rule | INTEGER | Required whenever bulk_classification is populated | yes | INT32 | core_column | Local |
-| Capture | capture.source_version | source_version | Globally allocated immutable input snapshot revision | BIGINT | Allocate from AnalyticalRevisionSequence; preserve on replay and increase for new input or a correction. | no | INT64 | core_column | Core Data MetadataExportState |
+| Capture | capture.source_version | source_version | Globally allocated immutable input snapshot revision | BIGINT | Allocate from AnalyticalRevisionSequence; preserve on replay and increase for new input or a correction. | no | INT64 | core_column | SQLite MetadataExportState |
 | Partition | identity.email_date | email_date | Canonical UTC email date fixed on first successful capture | TIMESTAMPTZ | Choose INTERNALDATE then unambiguous sent_at then first metadata_fetched_at; preserve for the durable mailbox message identity. | no | TIMESTAMP(MICROS, isAdjustedToUTC=true) | core_column | INTERNALDATE + Date + first metadata_fetched_at |
 | Partition | identity.email_date_source | email_date_source | Provenance of the fixed canonical UTC date | VARCHAR | internal_date sent_at or first_metadata_fetched_at | no | STRING (UTF8) | core_column | Local |
 
-## 05 Email Processing and Swift Transformers
+## 05 Email Processing and Rust Transformers
 
 Code-defined processing graphs with durable results and restart recovery.
 
@@ -1347,7 +1518,7 @@ Dependency scheduling, official outcomes, retries, registry lookup, and result r
 | area | rationale | requirement | rule_id |
 | --- | --- | --- | --- |
 | Scope | Keeps the first version small and aligned with known transformations | Implement a fixed email-processing pipeline abstraction rather than a general-purpose workflow engine. | pipeline.scope |
-| Pipeline | Avoids a dynamic workflow-definition database and makes invalid cycles testable before release | Declare the pipeline graph and step definitions in versioned Swift code and bind each step to one persisted transformerName. | pipeline.definition |
+| Pipeline | Avoids a dynamic workflow-definition database and makes invalid cycles testable before release | Declare the pipeline graph and step definitions in versioned Rust code and bind each step to one persisted transformerName. | pipeline.definition |
 | Pipeline | Makes pending work and overall completion durable and inspectable | Create one EmailProcessingStep row for every step in the selected pipeline version when creating a job. | pipeline.instantiate |
 | Dependencies | Provides explicit sequencing without persisting redundant graph definitions | Each code-defined step lists stable prerequisite step IDs and the pipeline definition must be acyclic. | pipeline.dependencies |
 | Dependencies | Prevents consumers from observing missing inputs | A pending step becomes ready only after all declared prerequisites reach stable terminal outcomes and every required predecessor succeeded or reused a valid result; optional failed or skipped predecessors are allowed only by an explicit no-output input contract. | pipeline.ready |
@@ -1359,18 +1530,18 @@ Dependency scheduling, official outcomes, retries, registry lookup, and result r
 | Completion | Defines completion independently of optional failures | A job succeeds only when every instantiated step is terminal, every required step is succeeded or reused, and no optional step failed permanently. | state.success |
 | Completion | Allows best-effort transformations without hiding their failures | A job succeedsWithWarnings only after every instantiated step is terminal, all required steps succeeded or reused, and one or more optional steps failed permanently. | state.warning |
 | Completion | Provides a clear terminal rule | A required permanent failure prevents job success; skip failed dependents and cancel other unfinished work cooperatively before publishing the terminal failed job. | state.failure |
-| Persistence | Prevents a terminal outcome from becoming visible without its complete result | Commit officialStatus customStatus statusMessage outputData output metadata timestamps and the resulting step state in one background-context save. | result.atomic_commit |
-| Persistence | Keeps variable outputs flexible without adding a column for every transformation | Store small transformation-specific output as versioned canonical JSON or binary Data and enable Core Data external binary storage when appropriate. | result.encoding |
-| Persistence | Keeps lifecycle fields queryable and migration-friendly | Store scheduler state official status transformer name attempts versions and timestamps as normal Core Data attributes rather than JSON or Data. | result.core_state |
+| Persistence | Prevents a terminal outcome from becoming visible without its complete result | Commit officialStatus customStatus statusMessage outputData output metadata timestamps and the resulting step state in one SQLite transaction. | result.atomic_commit |
+| Persistence | Keeps variable outputs flexible without adding a column for every transformation | Store small transformation-specific output as versioned canonical JSON TEXT or binary BLOB; store larger values in integrity-checked managed files. | result.encoding |
+| Persistence | Keeps lifecycle fields queryable and migration-friendly | Store scheduler state official status transformer name attempts versions and timestamps as indexed SQLite columns rather than opaque JSON or BLOB. | result.core_state |
 | Persistence | Preserves efficient filtering joining and date-range queries | Do not hide accountID emailUID or emailDate inside JSON or Data. | result.query_boundary |
 | Persistence | Keeps date-range queries deterministic when the Date header is missing or ambiguous | Copy the persisted canonical UTC email_date into emailDate; choose it once from INTERNALDATE, then unambiguous Date, then the first metadata_fetched_at and preserve it across refreshes. | result.email_date |
-| Persistence | Avoids oversized database rows while keeping recovery explicit | Store very large disposable artifacts in managed files and persist only an integrity-checked relative locator when Core Data external binary storage is unsuitable. | result.large_artifacts |
+| Persistence | Avoids oversized database rows while keeping recovery explicit | Store very large disposable artifacts in managed files and persist only an integrity-checked relative locator when a BLOB would exceed the configured row-size limit. | result.large_artifacts |
 | Retries | Custom statuses never control retry behavior | Treat the official retry status as retryable and the official failed status as permanent; map thrown infrastructure errors through the library failure classifier. | retry.classification |
 | Retries | Survives restart and avoids synchronized retry storms | Apply bounded exponential backoff with jitter and persist attemptCount maximumAttempts and nextAttemptAt. | retry.policy |
 | Retries | Prevents optional from meaning silently ignored | Apply the same bounded retry policy to optional steps before allowing succeededWithWarnings. | retry.optional |
 | Idempotency | Makes replay safe | Local transformations must be deterministic for their declared input fingerprint and step version. | idempotency.local |
 | Idempotency | Reduces duplicate external effects after a crash | Network or side-effecting steps must pass their persisted idempotencyKey when the remote system supports it and reconcile ambiguous outcomes before retrying. | idempotency.external |
-| Crash recovery | Prevents concurrent execution in the normal single-process design | Resolve the persisted transformer name version and output schema before claiming; a scheduler actor sets running leaseOwner leaseExpiresAt and attemptCount in one Core Data save, and result commits are fenced by that claim. | recovery.lease |
+| Crash recovery | Prevents concurrent execution in the normal single-process design | Resolve the persisted transformer name version and output schema before claiming; a scheduler worker sets running leaseOwner leaseExpiresAt and attemptCount in one SQLite transaction, and result commits are fenced by that claim. | recovery.lease |
 | Crash recovery | Prevents healthy network or I/O work from being reclaimed | Long-running executors renew their lease before expiry while short transformations use a conservative fixed lease duration. | recovery.lease_renewal |
 | Crash recovery | Makes interrupted work resumable | On startup return running steps with expired leases to ready or retryWaiting according to retry policy. | recovery.expired |
 | Crash recovery | Avoids unnecessary repeated work | Never rerun a succeeded or reused step unless its step version input fingerprint or output schema is no longer valid. | recovery.completed |
@@ -1381,12 +1552,12 @@ Dependency scheduling, official outcomes, retries, registry lookup, and result r
 | Result reuse | Prevents cross-message renamed-transformer or stale-input reuse | Reuse only a succeeded result matching account mailbox UIDVALIDITY UID transformerName stepVersion inputFingerprint and a supported outputSchemaVersion. | reuse.match |
 | Result reuse | Keeps every pipeline execution complete and auditable | Create the new step row in reused state and link reusedFrom to the prior result rather than silently omitting the step. | reuse.record |
 | Result reuse | Avoids references to missing or corrupted artifacts | Verify externally stored output still exists and matches its recorded integrity information before reuse. | reuse.validation |
-| Core Data | Uses Apple-supported persistence without extra infrastructure | Use one NSPersistentContainer configured with the SQLite store and lightweight migration where compatible. | coredata.container |
-| Core Data | Avoids blocking callers and respects managed-object queue confinement | Perform scheduler writes in private-queue background contexts and UI or CLI reads in separate contexts. | coredata.contexts |
-| Core Data | Prevents Core Data concurrency violations | Pass NSManagedObjectID or immutable Sendable values across tasks and never pass NSManagedObject instances between queues. | coredata.objects |
-| Core Data | Makes queue ownership explicit | Execute every managed-object access through its context perform or performAndWait API. | coredata.perform |
-| Core Data | Keeps observers consistent when parallel steps finish | Use an explicit merge policy and automatically merge background saves into read contexts. | coredata.merge |
-| Core Data | Avoids distributed locking complexity in v1 | Use a single in-process scheduler actor to select and claim work while allowing claimed transformations to execute concurrently. | coredata.scheduler |
+| SQLite | Portable explicit transactional persistence and session ownership | Open one application-local SQLite database with versioned transactional SQL migrations; configure WAL foreign_keys=ON synchronous=FULL and bounded busy_timeout. | sqlite.connection |
+| SQLite | Portable explicit transactional persistence and session ownership | Serialize writes through a session-owned writer worker; use separate bounded read connections and short transactions. | sqlite.writer |
+| SQLite | Portable explicit transactional persistence and session ownership | Pass owned immutable Rust snapshots and stable row IDs between workers; keep live transactions and connections inside their owning adapter. | sqlite.values |
+| SQLite | Portable explicit transactional persistence and session ownership | Claim tasks and allocate monotonic revisions in atomic SQLite transactions; fence completion updates with lease owner and claimed revision. | sqlite.claims |
+| SQLite | Portable explicit transactional persistence and session ownership | Use read transactions for consistent snapshots and publish progress only after durable commits; retry busy errors within configured limits. | sqlite.reads |
+| SQLite | Portable explicit transactional persistence and session ownership | Use one session-owned scheduler to select and claim work while bounded workers execute transformations concurrently. | sqlite.scheduler |
 | Indexes | Supports account-scoped and global date-range queries | Create a composite fetch index beginning with accountID and emailDate plus a standalone emailDate index. | index.date |
 | Indexes | Supports joins and durable IMAP lookup | Index accountID plus emailUID and the full message identity on EmailProcessingJob and denormalized EmailProcessingStep fields; reuse indexes include transformerName stepVersion and inputFingerprint. | index.identity |
 | Indexes | Keeps ready retry and expired-lease scans efficient | Index step state and nextAttemptAt, and index leaseExpiresAt for startup recovery. | index.scheduling |
@@ -1394,12 +1565,12 @@ Dependency scheduling, official outcomes, retries, registry lookup, and result r
 | Uniqueness | Prevents duplicate instantiated steps without relying on relationship constraints | Apply one step uniqueness constraint over denormalized jobID and stepID. | constraint.step |
 | Uniqueness | Prevents duplicate claims for the same logical side effect | Make idempotencyKey unique and derive it deterministically from job identity step ID step version and input fingerprint. | constraint.idempotency |
 | Transformers | Lets synchronous and asynchronous implementations share one scheduler path | Require every transformer to conform to the library EmailTransformer protocol with a unique non-empty stable string name and one consistent async callable surface. | transformer.interface |
-| Transformers | Makes runtime resolution deterministic | Inject the complete transformer collection when initializing the library and build an immutable name-indexed registry before starting Core Data work. | transformer.registration |
+| Transformers | Makes runtime resolution deterministic | Inject the complete transformer collection when initializing the library and build an immutable name-indexed registry before starting SQLite work. | transformer.registration |
 | Transformers | Catches incomplete dependency injection before new jobs are accepted | At library initialization validate the pipeline DAG unique step IDs unique transformer names per pipeline positive Int32 versions and exact registered transformer version and output schema matches. | transformer.pipeline_validation |
 | Transformers | Prevents ambiguous resume behavior | Reject library initialization when two registrations use the same transformer name or a name is empty or invalid. | transformer.duplicate |
-| Transformers | Makes the Core Data row sufficient to locate executable code | Resolve every ready or resumed step solely by its exact persisted transformerName. | transformer.resolve |
+| Transformers | Makes the SQLite row sufficient to locate executable code | Resolve every ready or resumed step solely by its exact persisted transformerName. | transformer.resolve |
 | Transformers | Treats deployment or configuration drift as actionable rather than retryable work | When a persisted transformerName is not registered mark the step and job blocked with failureCode transformer.missing without incrementing attemptCount. | transformer.missing |
-| Transformers | Prevents silent loss of resumability and accidental result reuse | Treat transformer names as durable identifiers that must not be renamed after release; an unavoidable rename requires an explicit Core Data migration from old name to new name before resuming. | transformer.rename |
+| Transformers | Prevents silent loss of resumability and accidental result reuse | Treat transformer names as durable identifiers that must not be renamed after release; an unavoidable rename requires an explicit SQLite migration from old name to new name before resuming. | transformer.rename |
 | Transformers | Keeps lifecycle logic controlled by the library | Allow only succeeded, retry, failed, and skipped as official statuses; persist customStatus and statusMessage as optional annotations that never alter scheduling semantics. | transformer.status |
 | Transformers | Makes every official result deterministic for the scheduler | Map succeeded to succeeded, retry to retryWaiting until attempts are exhausted, failed to failed, and skipped to skipped; treat skipped from a required step as a permanent transformer contract failure. | transformer.status_mapping |
 | Transformers | Keeps registration and execution APIs uniform | Adapt synchronous transformers to the same async erased callable used by native async transformers. | transformer.sync |
@@ -1411,127 +1582,127 @@ Dependency scheduling, official outcomes, retries, registry lookup, and result r
 | Scope | Keeps custom transformers compatible with metadataOnly sync | Automatic metadata workflows supply only normalized metadata and dependency outputs to transformers; fetching message bodies requires a separate explicit caller request. | result.metadata_boundary |
 | Persistence | Identity and dependency outputs alone cannot supply headers to the first transformer | Accept a versioned immutable normalized metadata envelope with each job; persist its schema source revision managed relative locator and fingerprint before scheduling, verify the file before each execution, and supply it to every TransformerInput and StepExecutionContext. | input.metadata_snapshot |
 
-### 02 Core Data Processing and Export Fields
+### 02 SQLite Processing and Export Fields
 
-Jobs, steps, persisted outputs, leases, and versioned export checkpoints. Source: [coredata_email_pipeline_fields.csv](../design-meta/examples/processing/coredata_email_pipeline_fields.csv).
+Jobs, steps, persisted outputs, leases, and versioned export checkpoints. Source: [sqlite_email_pipeline_fields.csv](../design-meta/examples/processing/sqlite_email_pipeline_fields.csv).
 
-#### Core Data Processing and Export Fields
+#### SQLite Processing and Export Fields
 
-| core_data_type | default_value | description | entity | field | field_id | indexes | relationship | required | uniqueness_group |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| UUID |  | Stable job identifier | EmailProcessingJob | id | processing_job.id | job_id |  | yes | job_id |
-| String |  | Stable account identifier and first-class query field | EmailProcessingJob | accountID | processing_job.account_id | job_identity;account_email_date |  | yes | job_identity |
-| String |  | Stable mailbox identifier because an IMAP UID is mailbox-local | EmailProcessingJob | mailboxID | processing_job.mailbox_id | job_identity |  | yes | job_identity |
-| Integer 64 |  | IMAP UIDVALIDITY paired with the UID | EmailProcessingJob | uidValidity | processing_job.uid_validity | job_identity |  | yes | job_identity |
-| Integer 64 |  | IMAP UID and first-class query field | EmailProcessingJob | emailUID | processing_job.email_uid | job_identity;account_uid |  | yes | job_identity |
-| Date |  | Normalized UTC message date used for efficient date-range queries | EmailProcessingJob | emailDate | processing_job.email_date | account_email_date;email_date |  | yes |  |
-| String | email-processing-v1 | Stable code-defined pipeline identifier | EmailProcessingJob | pipelineID | processing_job.pipeline_id | job_identity |  | yes | job_identity |
-| Integer 32 | 1 | Version of the pipeline graph and completion rules | EmailProcessingJob | pipelineVersion | processing_job.pipeline_version | job_identity |  | yes | job_identity |
-| String |  | Digest of the source inputs relevant to the pipeline | EmailProcessingJob | inputFingerprint | processing_job.input_fingerprint | job_identity |  | yes | job_identity |
-| String | pending | Raw job-state enum | EmailProcessingJob | state | processing_job.state | job_state |  | yes |  |
-| Integer 32 | 0 | Number of required steps instantiated for this job | EmailProcessingJob | requiredStepCount | processing_job.required_step_count |  |  | yes |  |
-| Integer 32 | 0 | Required steps in a successful or valid reused state | EmailProcessingJob | completedRequiredStepCount | processing_job.completed_required_step_count |  |  | yes |  |
-| Integer 32 | 0 | Optional steps that failed permanently, including non-retryable failures | EmailProcessingJob | failedOptionalStepCount | processing_job.failed_optional_step_count |  |  | yes |  |
-| Date |  | Creation timestamp | EmailProcessingJob | createdAt | processing_job.created_at | created_at |  | yes |  |
-| Date |  | Last durable state-change timestamp | EmailProcessingJob | updatedAt | processing_job.updated_at | updated_at |  | yes |  |
-| Date |  | First execution timestamp | EmailProcessingJob | startedAt | processing_job.started_at |  |  | no |  |
-| Date |  | Terminal completion timestamp | EmailProcessingJob | completedAt | processing_job.completed_at | completed_at |  | no |  |
-| To-many EmailProcessingStep | [] | Instantiated transformation steps and their persisted outputs | EmailProcessingJob | steps | processing_job.steps |  | one-to-many; inverse=job; delete=cascade | yes |  |
-| Integer 64 |  | Globally reserved revision allocated when accepting this job input snapshot before execution | EmailProcessingJob | sourceRevision | processing_job.source_revision |  |  | yes |  |
-| Integer 32 |  | Schema used to decode the immutable normalized metadata input | EmailProcessingJob | metadataSchemaVersion | processing_job.metadata_schema_version |  |  | yes |  |
-| Integer 64 |  | Globally allocated revision of the consumed metadata snapshot | EmailProcessingJob | metadataSourceVersion | processing_job.metadata_source_version |  |  | yes |  |
-| String |  | Managed immutable metadata file retained while this job or its results can be resumed or reused | EmailProcessingJob | metadataRelativePath | processing_job.metadata_relative_path |  |  | yes |  |
-| String |  | Digest verified before constructing TransformerInput.metadata | EmailProcessingJob | metadataFingerprint | processing_job.metadata_fingerprint |  |  | yes |  |
-| UUID |  | Stable step-result identifier | EmailProcessingStep | id | processing_step.id | step_id |  | yes | step_id |
-| To-one EmailProcessingJob |  | Owning email-processing job | EmailProcessingStep | job | processing_step.job |  | many-to-one; inverse=steps | yes |  |
-| UUID |  | Denormalized job ID used by the Core Data uniqueness constraint | EmailProcessingStep | jobID | processing_step.job_id | step_identity |  | yes | step_identity |
-| String |  | Stable code-defined transformation identifier | EmailProcessingStep | stepID | processing_step.step_id | step_identity;step_state |  | yes | step_identity |
-| String |  | Exact unique registry name used to resolve the transformer after restart | EmailProcessingStep | transformerName | processing_step.transformer_name | transformer_name;result_reuse |  | yes |  |
-| Integer 32 | 1 | Version declared by the registered transformer implementation | EmailProcessingStep | stepVersion | processing_step.step_version | result_reuse |  | yes |  |
-| Boolean | true | Whether final job success requires this step | EmailProcessingStep | isRequired | processing_step.is_required |  |  | yes |  |
-| String | local | Raw execution classification: local cpu io or network | EmailProcessingStep | executionKind | processing_step.execution_kind |  |  | yes |  |
-| String | pending | Raw step-state enum | EmailProcessingStep | state | processing_step.state | step_state;retry_due |  | yes |  |
-| String |  | Library-defined transformer outcome: succeeded retry failed or skipped | EmailProcessingStep | officialStatus | processing_step.official_status | official_status |  | no |  |
-| String |  | Optional transformer-defined status for diagnostics and reporting only | EmailProcessingStep | customStatus | processing_step.custom_status | custom_status |  | no |  |
-| String |  | Optional human-readable message returned by the transformer | EmailProcessingStep | statusMessage | processing_step.status_message |  |  | no |  |
-| Integer 32 | 0 | Number of attempts claimed | EmailProcessingStep | attemptCount | processing_step.attempt_count |  |  | yes |  |
-| Integer 32 | 1 | Maximum attempts including the first attempt | EmailProcessingStep | maximumAttempts | processing_step.maximum_attempts |  |  | yes |  |
-| Date |  | Earliest retry time after backoff | EmailProcessingStep | nextAttemptAt | processing_step.next_attempt_at | retry_due |  | no |  |
-| String |  | Identifier of the process currently executing the step | EmailProcessingStep | leaseOwner | processing_step.lease_owner |  |  | no |  |
-| Date |  | Deadline after which a running step may be reclaimed | EmailProcessingStep | leaseExpiresAt | processing_step.lease_expires_at | expired_lease |  | no |  |
-| String |  | Digest of the exact inputs consumed by this step | EmailProcessingStep | inputFingerprint | processing_step.input_fingerprint | result_reuse |  | yes |  |
-| String |  | Stable key supplied to idempotent external side effects | EmailProcessingStep | idempotencyKey | processing_step.idempotency_key | idempotency_key |  | yes | idempotency_key |
-| String |  | Raw enum such as json binary utf8 or none | EmailProcessingStep | outputEncoding | processing_step.output_encoding |  |  | no |  |
-| Integer 32 |  | Version used to decode outputData | EmailProcessingStep | outputSchemaVersion | processing_step.output_schema_version |  |  | no |  |
-| Binary Data |  | Persisted transformation output; enable external binary storage for larger values | EmailProcessingStep | outputData | processing_step.output_data |  |  | no |  |
-| To-one EmailProcessingStep |  | Audit link to the original succeeded step; output is copied into the new step so export is self-contained | EmailProcessingStep | reusedFrom | processing_step.reused_from |  | self-reference; delete=nullify | no |  |
-| String |  | Stable machine-readable failure code | EmailProcessingStep | failureCode | processing_step.failure_code | failure_code |  | no |  |
-| String |  | Sanitized diagnostic message without credentials or unnecessary message content | EmailProcessingStep | failureMessage | processing_step.failure_message |  |  | no |  |
-| Boolean | false | Whether policy permits another attempt | EmailProcessingStep | failureIsRetryable | processing_step.failure_is_retryable |  |  | yes |  |
-| Date |  | Step creation timestamp | EmailProcessingStep | createdAt | processing_step.created_at |  |  | yes |  |
-| Date |  | Last durable state-change timestamp | EmailProcessingStep | updatedAt | processing_step.updated_at | updated_at |  | yes |  |
-| Date |  | Most recent attempt start timestamp | EmailProcessingStep | startedAt | processing_step.started_at |  |  | no |  |
-| Date |  | Successful skipped or final-failure timestamp | EmailProcessingStep | finishedAt | processing_step.finished_at |  |  | no |  |
-| To-one ProcessingResultExportState |  | Durable downstream-export checkpoint for this result | EmailProcessingStep | exportState | processing_step.export_state |  | one-to-one; inverse=step; delete=cascade | no |  |
-| String |  | Denormalized immutable job field for direct identity date and reuse indexing; maintained in the same save | EmailProcessingStep | accountID | processing_step.account_id | step_message;step_account_date;result_reuse |  | yes |  |
-| String |  | Denormalized immutable job field for direct identity date and reuse indexing; maintained in the same save | EmailProcessingStep | mailboxID | processing_step.mailbox_id | step_message;result_reuse |  | yes |  |
-| Integer 64 |  | Denormalized immutable job field for direct identity date and reuse indexing; maintained in the same save | EmailProcessingStep | uidValidity | processing_step.uid_validity | step_message;result_reuse |  | yes |  |
-| Integer 64 |  | Denormalized immutable job field for direct identity date and reuse indexing; maintained in the same save | EmailProcessingStep | emailUID | processing_step.email_uid | step_message;step_account_uid;result_reuse |  | yes |  |
-| Date |  | Denormalized immutable job field for direct identity date and reuse indexing; maintained in the same save | EmailProcessingStep | emailDate | processing_step.email_date | step_account_date;step_email_date |  | yes |  |
-| UUID |  | Stable export-state identifier | ProcessingResultExportState | id | result_export.id | result_export_id |  | yes | result_export_id |
-| To-one EmailProcessingStep |  | Operational result being exported | ProcessingResultExportState | step | result_export.step |  | one-to-one; inverse=exportState | yes |  |
-| URI |  | Permanent Core Data object URI for idempotent lookup and uniqueness | ProcessingResultExportState | stepObjectID | result_export.step_object_id | result_export_step |  | yes | result_export_step |
-| String |  | Denormalized account key for efficient batch selection | ProcessingResultExportState | accountID | result_export.account_id | result_export_ready;result_export_identity |  | yes |  |
-| String |  | Denormalized mailbox key because an IMAP UID is mailbox-local | ProcessingResultExportState | mailboxID | result_export.mailbox_id | result_export_identity |  | yes |  |
-| Integer 64 |  | Denormalized IMAP UIDVALIDITY | ProcessingResultExportState | uidValidity | result_export.uid_validity | result_export_identity |  | yes |  |
-| Integer 64 |  | Denormalized IMAP UID | ProcessingResultExportState | emailUID | result_export.email_uid | result_export_identity |  | yes |  |
-| Date |  | Denormalized canonical UTC email date | ProcessingResultExportState | emailDate | result_export.email_date | result_export_ready |  | yes |  |
-| String |  | Persisted transformer lookup and destination-key component | ProcessingResultExportState | transformerName | result_export.transformer_name | result_export_identity |  | yes |  |
-| Integer 32 |  | Destination-key component and transformer contract version | ProcessingResultExportState | transformerVersion | result_export.transformer_version | result_export_identity |  | yes |  |
-| Integer 64 |  | Reserved positive globally allocated revision of accepted job inputs or an explicit result correction; never reset across jobs | ProcessingResultExportState | sourceVersion | result_export.source_version | result_export_ready |  | yes |  |
-| Integer 64 |  | Highest sourceVersion acknowledged after a DuckDB commit | ProcessingResultExportState | exportedVersion | result_export.exported_version |  |  | no |  |
-| Integer 32 |  | Destination schema version used for the acknowledged export | ProcessingResultExportState | duckDBSchemaVersion | result_export.duckdb_schema_version |  |  | no |  |
-| String | pending | Raw export state: pending exporting retryWaiting exported or blocked | ProcessingResultExportState | state | result_export.state | result_export_ready |  | yes |  |
-| UUID |  | Current export batch claim identifier | ProcessingResultExportState | batchID | result_export.batch_id | result_export_batch |  | no |  |
-| Integer 32 | 0 | Number of DuckDB export attempts | ProcessingResultExportState | attemptCount | result_export.attempt_count |  |  | yes |  |
-| Integer 32 | 5 | Retry ceiling before manual intervention | ProcessingResultExportState | maximumAttempts | result_export.maximum_attempts |  |  | yes |  |
-| Date |  | Earliest time for the next retry | ProcessingResultExportState | nextAttemptAt | result_export.next_attempt_at | result_export_ready |  | no |  |
-| String |  | Exporter process currently owning the claim | ProcessingResultExportState | leaseOwner | result_export.lease_owner |  |  | no |  |
-| Date |  | Deadline after which an unfinished claim may be replayed | ProcessingResultExportState | leaseExpiresAt | result_export.lease_expires_at | result_export_lease |  | no |  |
-| Date |  | Timestamp of the latest acknowledged DuckDB commit | ProcessingResultExportState | exportedAt | result_export.exported_at | result_exported_at |  | no |  |
-| String |  | Stable exporter failure code | ProcessingResultExportState | lastErrorCode | result_export.last_error_code | result_export_error |  | no |  |
-| String |  | Sanitized exporter diagnostic | ProcessingResultExportState | lastErrorMessage | result_export.last_error_message |  |  | no |  |
-| Date |  | Export-state creation timestamp | ProcessingResultExportState | createdAt | result_export.created_at |  |  | yes |  |
-| Date |  | Last export-state mutation timestamp | ProcessingResultExportState | updatedAt | result_export.updated_at | result_export_updated |  | yes |  |
-| UUID |  | Stable metadata-export checkpoint | MetadataExportState | id | metadata_export.id | metadata_export_id |  | yes | metadata_export_id |
-| To-one SyncTask |  | Metadata fetch task that owns this immutable normalized snapshot | MetadataExportState | task | metadata_export.task |  | one-to-one; inverse=metadataExportState | yes |  |
-| String |  | Owning account UUID encoded as a string | MetadataExportState | accountID | metadata_export.account_id | metadata_export_ready;metadata_export_identity |  | yes |  |
-| String |  | Owning mailbox UUID encoded as a string | MetadataExportState | mailboxID | metadata_export.mailbox_id | metadata_export_identity |  | yes |  |
-| Integer 64 |  | Mailbox generation | MetadataExportState | uidValidity | metadata_export.uid_validity | metadata_export_identity |  | yes |  |
-| Integer 64 |  | Mailbox-local IMAP UID | MetadataExportState | uid | metadata_export.uid | metadata_export_identity |  | yes |  |
-| Date |  | Persisted canonical UTC email date | MetadataExportState | emailDate | metadata_export.email_date | metadata_export_ready |  | yes |  |
-| Integer 64 |  | Globally allocated revision reserved when accepting the fetched input snapshot | MetadataExportState | sourceVersion | metadata_export.source_version | metadata_export_ready |  | yes |  |
-| Integer 32 | 1 | Normalized metadata file schema version | MetadataExportState | resultSchemaVersion | metadata_export.result_schema_version |  |  | yes |  |
-| String |  | Integrity-checked file beneath the account intermediate directory | MetadataExportState | resultRelativePath | metadata_export.result_relative_path |  |  | yes |  |
-| String |  | Digest of the immutable normalized metadata file | MetadataExportState | resultFingerprint | metadata_export.result_fingerprint |  |  | yes |  |
-| String | pending | pending exporting retryWaiting exported or blocked | MetadataExportState | state | metadata_export.state | metadata_export_ready |  | yes |  |
-| UUID |  | Current claim token used to fence acknowledgement and failure saves | MetadataExportState | batchID | metadata_export.batch_id | metadata_export_batch |  | no |  |
-| Integer 32 | 0 | Claimed export attempts for this revision | MetadataExportState | attemptCount | metadata_export.attempt_count |  |  | yes |  |
-| Integer 32 | 5 | Bounded retry ceiling | MetadataExportState | maximumAttempts | metadata_export.maximum_attempts |  |  | yes |  |
-| Date |  | Backoff deadline | MetadataExportState | nextAttemptAt | metadata_export.next_attempt_at | metadata_export_ready |  | no |  |
-| String |  | Owning exporter process session | MetadataExportState | leaseOwner | metadata_export.lease_owner |  |  | no |  |
-| Date |  | Expired claim may be replayed | MetadataExportState | leaseExpiresAt | metadata_export.lease_expires_at | metadata_export_lease |  | no |  |
-| Integer 64 |  | Highest acknowledged claimed revision | MetadataExportState | exportedVersion | metadata_export.exported_version |  |  | no |  |
-| Integer 32 |  | Acknowledged email-metadata DuckDB schema version | MetadataExportState | duckDBSchemaVersion | metadata_export.duckdb_schema_version |  |  | no |  |
-| Date |  | Core Data acknowledgement time following the DuckDB commit | MetadataExportState | exportedAt | metadata_export.exported_at |  |  | no |  |
-| String |  | Stable metadata exporter error | MetadataExportState | lastErrorCode | metadata_export.last_error_code |  |  | no |  |
-| String |  | Sanitized diagnostic | MetadataExportState | lastErrorMessage | metadata_export.last_error_message |  |  | no |  |
-| Date |  | Checkpoint creation timestamp | MetadataExportState | createdAt | metadata_export.created_at |  |  | yes |  |
-| Date |  | Last durable checkpoint mutation | MetadataExportState | updatedAt | metadata_export.updated_at |  |  | yes |  |
-| Date |  | Initial metadata observation timestamp retained across refreshes | MetadataExportState | firstSeenAt | metadata_export.first_seen_at |  |  | yes |  |
-| String |  | Canonical date provenance retained across refreshes: internal_date sent_at or first_metadata_fetched_at | MetadataExportState | emailDateSource | metadata_export.email_date_source |  |  | yes |  |
-| String | analytics | Singleton shared Core Data analytical revision allocator | AnalyticalRevisionSequence | name | revision_sequence.name | revision_sequence |  | yes | revision_sequence |
-| Integer 64 | 1 | Reserve and increment atomically with accepted inputs or corrections; block on Int64 exhaustion | AnalyticalRevisionSequence | nextValue | revision_sequence.next_value |  |  | yes |  |
+| default_value | description | entity | field | field_id | indexes | logical_type | relationship | required | sqlite_storage | uniqueness_group |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+|  | Stable job identifier | EmailProcessingJob | id | processing_job.id | job_id | UUID |  | yes | TEXT | job_id |
+|  | Stable account identifier and first-class query field | EmailProcessingJob | accountID | processing_job.account_id | job_identity;account_email_date | String |  | yes | TEXT | job_identity |
+|  | Stable mailbox identifier because an IMAP UID is mailbox-local | EmailProcessingJob | mailboxID | processing_job.mailbox_id | job_identity | String |  | yes | TEXT | job_identity |
+|  | IMAP UIDVALIDITY paired with the UID | EmailProcessingJob | uidValidity | processing_job.uid_validity | job_identity | Integer 64 |  | yes | INTEGER | job_identity |
+|  | IMAP UID and first-class query field | EmailProcessingJob | emailUID | processing_job.email_uid | job_identity;account_uid | Integer 64 |  | yes | INTEGER | job_identity |
+|  | Normalized UTC message date used for efficient date-range queries | EmailProcessingJob | emailDate | processing_job.email_date | account_email_date;email_date | Date |  | yes | INTEGER UTC Unix milliseconds |  |
+| email-processing-v1 | Stable code-defined pipeline identifier | EmailProcessingJob | pipelineID | processing_job.pipeline_id | job_identity | String |  | yes | TEXT | job_identity |
+| 1 | Version of the pipeline graph and completion rules | EmailProcessingJob | pipelineVersion | processing_job.pipeline_version | job_identity | Integer 32 |  | yes | INTEGER | job_identity |
+|  | Digest of the source inputs relevant to the pipeline | EmailProcessingJob | inputFingerprint | processing_job.input_fingerprint | job_identity | String |  | yes | TEXT | job_identity |
+| pending | Raw job-state enum | EmailProcessingJob | state | processing_job.state | job_state | String |  | yes | TEXT |  |
+| 0 | Number of required steps instantiated for this job | EmailProcessingJob | requiredStepCount | processing_job.required_step_count |  | Integer 32 |  | yes | INTEGER |  |
+| 0 | Required steps in a successful or valid reused state | EmailProcessingJob | completedRequiredStepCount | processing_job.completed_required_step_count |  | Integer 32 |  | yes | INTEGER |  |
+| 0 | Optional steps that failed permanently, including non-retryable failures | EmailProcessingJob | failedOptionalStepCount | processing_job.failed_optional_step_count |  | Integer 32 |  | yes | INTEGER |  |
+|  | Creation timestamp | EmailProcessingJob | createdAt | processing_job.created_at | created_at | Date |  | yes | INTEGER UTC Unix milliseconds |  |
+|  | Last durable state-change timestamp | EmailProcessingJob | updatedAt | processing_job.updated_at | updated_at | Date |  | yes | INTEGER UTC Unix milliseconds |  |
+|  | First execution timestamp | EmailProcessingJob | startedAt | processing_job.started_at |  | Date |  | no | INTEGER UTC Unix milliseconds |  |
+|  | Terminal completion timestamp | EmailProcessingJob | completedAt | processing_job.completed_at | completed_at | Date |  | no | INTEGER UTC Unix milliseconds |  |
+| [] | Instantiated transformation steps and their persisted outputs | EmailProcessingJob | steps | processing_job.steps |  | To-many EmailProcessingStep | one-to-many; inverse=job; delete=cascade | yes | Foreign key or inverse/join table; no serialized object graph |  |
+|  | Globally reserved revision allocated when accepting this job input snapshot before execution | EmailProcessingJob | sourceRevision | processing_job.source_revision |  | Integer 64 |  | yes | INTEGER |  |
+|  | Schema used to decode the immutable normalized metadata input | EmailProcessingJob | metadataSchemaVersion | processing_job.metadata_schema_version |  | Integer 32 |  | yes | INTEGER |  |
+|  | Globally allocated revision of the consumed metadata snapshot | EmailProcessingJob | metadataSourceVersion | processing_job.metadata_source_version |  | Integer 64 |  | yes | INTEGER |  |
+|  | Managed immutable metadata file retained while this job or its results can be resumed or reused | EmailProcessingJob | metadataRelativePath | processing_job.metadata_relative_path |  | String |  | yes | TEXT |  |
+|  | Digest verified before constructing TransformerInput.metadata | EmailProcessingJob | metadataFingerprint | processing_job.metadata_fingerprint |  | String |  | yes | TEXT |  |
+|  | Stable step-result identifier | EmailProcessingStep | id | processing_step.id | step_id | UUID |  | yes | TEXT | step_id |
+|  | Owning email-processing job | EmailProcessingStep | job | processing_step.job |  | To-one EmailProcessingJob | many-to-one; inverse=steps | yes | Foreign key or inverse/join table; no serialized object graph |  |
+|  | Denormalized job ID used by the SQLite uniqueness constraint | EmailProcessingStep | jobID | processing_step.job_id | step_identity | UUID |  | yes | TEXT | step_identity |
+|  | Stable code-defined transformation identifier | EmailProcessingStep | stepID | processing_step.step_id | step_identity;step_state | String |  | yes | TEXT | step_identity |
+|  | Exact unique registry name used to resolve the transformer after restart | EmailProcessingStep | transformerName | processing_step.transformer_name | transformer_name;result_reuse | String |  | yes | TEXT |  |
+| 1 | Version declared by the registered transformer implementation | EmailProcessingStep | stepVersion | processing_step.step_version | result_reuse | Integer 32 |  | yes | INTEGER |  |
+| true | Whether final job success requires this step | EmailProcessingStep | isRequired | processing_step.is_required |  | Boolean |  | yes | TEXT |  |
+| local | Raw execution classification: local cpu io or network | EmailProcessingStep | executionKind | processing_step.execution_kind |  | String |  | yes | TEXT |  |
+| pending | Raw step-state enum | EmailProcessingStep | state | processing_step.state | step_state;retry_due | String |  | yes | TEXT |  |
+|  | Library-defined transformer outcome: succeeded retry failed or skipped | EmailProcessingStep | officialStatus | processing_step.official_status | official_status | String |  | no | TEXT |  |
+|  | Optional transformer-defined status for diagnostics and reporting only | EmailProcessingStep | customStatus | processing_step.custom_status | custom_status | String |  | no | TEXT |  |
+|  | Optional human-readable message returned by the transformer | EmailProcessingStep | statusMessage | processing_step.status_message |  | String |  | no | TEXT |  |
+| 0 | Number of attempts claimed | EmailProcessingStep | attemptCount | processing_step.attempt_count |  | Integer 32 |  | yes | INTEGER |  |
+| 1 | Maximum attempts including the first attempt | EmailProcessingStep | maximumAttempts | processing_step.maximum_attempts |  | Integer 32 |  | yes | INTEGER |  |
+|  | Earliest retry time after backoff | EmailProcessingStep | nextAttemptAt | processing_step.next_attempt_at | retry_due | Date |  | no | INTEGER UTC Unix milliseconds |  |
+|  | Identifier of the process currently executing the step | EmailProcessingStep | leaseOwner | processing_step.lease_owner |  | String |  | no | TEXT |  |
+|  | Deadline after which a running step may be reclaimed | EmailProcessingStep | leaseExpiresAt | processing_step.lease_expires_at | expired_lease | Date |  | no | INTEGER UTC Unix milliseconds |  |
+|  | Digest of the exact inputs consumed by this step | EmailProcessingStep | inputFingerprint | processing_step.input_fingerprint | result_reuse | String |  | yes | TEXT |  |
+|  | Stable key supplied to idempotent external side effects | EmailProcessingStep | idempotencyKey | processing_step.idempotency_key | idempotency_key | String |  | yes | TEXT | idempotency_key |
+|  | Raw enum such as json binary utf8 or none | EmailProcessingStep | outputEncoding | processing_step.output_encoding |  | String |  | no | TEXT |  |
+|  | Version used to decode outputData | EmailProcessingStep | outputSchemaVersion | processing_step.output_schema_version |  | Integer 32 |  | no | INTEGER |  |
+|  | Persisted transformation output; use an integrity-checked managed file for larger values | EmailProcessingStep | outputData | processing_step.output_data |  | Bytes |  | no | BLOB |  |
+|  | Audit link to the original succeeded step; output is copied into the new step so export is self-contained | EmailProcessingStep | reusedFrom | processing_step.reused_from |  | To-one EmailProcessingStep | self-reference; delete=nullify | no | Foreign key or inverse/join table; no serialized object graph |  |
+|  | Stable machine-readable failure code | EmailProcessingStep | failureCode | processing_step.failure_code | failure_code | String |  | no | TEXT |  |
+|  | Sanitized diagnostic message without credentials or unnecessary message content | EmailProcessingStep | failureMessage | processing_step.failure_message |  | String |  | no | TEXT |  |
+| false | Whether policy permits another attempt | EmailProcessingStep | failureIsRetryable | processing_step.failure_is_retryable |  | Boolean |  | yes | TEXT |  |
+|  | Step creation timestamp | EmailProcessingStep | createdAt | processing_step.created_at |  | Date |  | yes | INTEGER UTC Unix milliseconds |  |
+|  | Last durable state-change timestamp | EmailProcessingStep | updatedAt | processing_step.updated_at | updated_at | Date |  | yes | INTEGER UTC Unix milliseconds |  |
+|  | Most recent attempt start timestamp | EmailProcessingStep | startedAt | processing_step.started_at |  | Date |  | no | INTEGER UTC Unix milliseconds |  |
+|  | Successful skipped or final-failure timestamp | EmailProcessingStep | finishedAt | processing_step.finished_at |  | Date |  | no | INTEGER UTC Unix milliseconds |  |
+|  | Durable downstream-export checkpoint for this result | EmailProcessingStep | exportState | processing_step.export_state |  | To-one ProcessingResultExportState | one-to-one; inverse=step; delete=cascade | no | Foreign key or inverse/join table; no serialized object graph |  |
+|  | Denormalized immutable job field for direct identity date and reuse indexing; maintained in the same SQL transaction | EmailProcessingStep | accountID | processing_step.account_id | step_message;step_account_date;result_reuse | String |  | yes | TEXT |  |
+|  | Denormalized immutable job field for direct identity date and reuse indexing; maintained in the same SQL transaction | EmailProcessingStep | mailboxID | processing_step.mailbox_id | step_message;result_reuse | String |  | yes | TEXT |  |
+|  | Denormalized immutable job field for direct identity date and reuse indexing; maintained in the same SQL transaction | EmailProcessingStep | uidValidity | processing_step.uid_validity | step_message;result_reuse | Integer 64 |  | yes | INTEGER |  |
+|  | Denormalized immutable job field for direct identity date and reuse indexing; maintained in the same SQL transaction | EmailProcessingStep | emailUID | processing_step.email_uid | step_message;step_account_uid;result_reuse | Integer 64 |  | yes | INTEGER |  |
+|  | Denormalized immutable job field for direct identity date and reuse indexing; maintained in the same SQL transaction | EmailProcessingStep | emailDate | processing_step.email_date | step_account_date;step_email_date | Date |  | yes | INTEGER UTC Unix milliseconds |  |
+|  | Stable export-state identifier | ProcessingResultExportState | id | result_export.id | result_export_id | UUID |  | yes | TEXT | result_export_id |
+|  | Operational result being exported | ProcessingResultExportState | step | result_export.step |  | To-one EmailProcessingStep | one-to-one; inverse=exportState | yes | Foreign key or inverse/join table; no serialized object graph |  |
+|  | Stable processing-step primary key with unique foreign-key constraint for idempotent lookup | ProcessingResultExportState | stepID | result_export.step_id | result_export_step | UUID |  | yes | TEXT | result_export_step |
+|  | Denormalized account key for efficient batch selection | ProcessingResultExportState | accountID | result_export.account_id | result_export_ready;result_export_identity | String |  | yes | TEXT |  |
+|  | Denormalized mailbox key because an IMAP UID is mailbox-local | ProcessingResultExportState | mailboxID | result_export.mailbox_id | result_export_identity | String |  | yes | TEXT |  |
+|  | Denormalized IMAP UIDVALIDITY | ProcessingResultExportState | uidValidity | result_export.uid_validity | result_export_identity | Integer 64 |  | yes | INTEGER |  |
+|  | Denormalized IMAP UID | ProcessingResultExportState | emailUID | result_export.email_uid | result_export_identity | Integer 64 |  | yes | INTEGER |  |
+|  | Denormalized canonical UTC email date | ProcessingResultExportState | emailDate | result_export.email_date | result_export_ready | Date |  | yes | INTEGER UTC Unix milliseconds |  |
+|  | Persisted transformer lookup and destination-key component | ProcessingResultExportState | transformerName | result_export.transformer_name | result_export_identity | String |  | yes | TEXT |  |
+|  | Destination-key component and transformer contract version | ProcessingResultExportState | transformerVersion | result_export.transformer_version | result_export_identity | Integer 32 |  | yes | INTEGER |  |
+|  | Reserved positive globally allocated revision of accepted job inputs or an explicit result correction; never reset across jobs | ProcessingResultExportState | sourceVersion | result_export.source_version | result_export_ready | Integer 64 |  | yes | INTEGER |  |
+|  | Highest sourceVersion acknowledged after a DuckDB commit | ProcessingResultExportState | exportedVersion | result_export.exported_version |  | Integer 64 |  | no | INTEGER |  |
+|  | Destination schema version used for the acknowledged export | ProcessingResultExportState | duckDBSchemaVersion | result_export.duckdb_schema_version |  | Integer 32 |  | no | INTEGER |  |
+| pending | Raw export state: pending exporting retryWaiting exported or blocked | ProcessingResultExportState | state | result_export.state | result_export_ready | String |  | yes | TEXT |  |
+|  | Current export batch claim identifier | ProcessingResultExportState | batchID | result_export.batch_id | result_export_batch | UUID |  | no | TEXT |  |
+| 0 | Number of DuckDB export attempts | ProcessingResultExportState | attemptCount | result_export.attempt_count |  | Integer 32 |  | yes | INTEGER |  |
+| 5 | Retry ceiling before manual intervention | ProcessingResultExportState | maximumAttempts | result_export.maximum_attempts |  | Integer 32 |  | yes | INTEGER |  |
+|  | Earliest time for the next retry | ProcessingResultExportState | nextAttemptAt | result_export.next_attempt_at | result_export_ready | Date |  | no | INTEGER UTC Unix milliseconds |  |
+|  | Exporter process currently owning the claim | ProcessingResultExportState | leaseOwner | result_export.lease_owner |  | String |  | no | TEXT |  |
+|  | Deadline after which an unfinished claim may be replayed | ProcessingResultExportState | leaseExpiresAt | result_export.lease_expires_at | result_export_lease | Date |  | no | INTEGER UTC Unix milliseconds |  |
+|  | Timestamp of the latest acknowledged DuckDB commit | ProcessingResultExportState | exportedAt | result_export.exported_at | result_exported_at | Date |  | no | INTEGER UTC Unix milliseconds |  |
+|  | Stable exporter failure code | ProcessingResultExportState | lastErrorCode | result_export.last_error_code | result_export_error | String |  | no | TEXT |  |
+|  | Sanitized exporter diagnostic | ProcessingResultExportState | lastErrorMessage | result_export.last_error_message |  | String |  | no | TEXT |  |
+|  | Export-state creation timestamp | ProcessingResultExportState | createdAt | result_export.created_at |  | Date |  | yes | INTEGER UTC Unix milliseconds |  |
+|  | Last export-state mutation timestamp | ProcessingResultExportState | updatedAt | result_export.updated_at | result_export_updated | Date |  | yes | INTEGER UTC Unix milliseconds |  |
+|  | Stable metadata-export checkpoint | MetadataExportState | id | metadata_export.id | metadata_export_id | UUID |  | yes | TEXT | metadata_export_id |
+|  | Metadata fetch task that owns this immutable normalized snapshot | MetadataExportState | task | metadata_export.task |  | To-one SyncTask | one-to-one; inverse=metadataExportState | yes | Foreign key or inverse/join table; no serialized object graph |  |
+|  | Owning account UUID encoded as a string | MetadataExportState | accountID | metadata_export.account_id | metadata_export_ready;metadata_export_identity | String |  | yes | TEXT |  |
+|  | Owning mailbox UUID encoded as a string | MetadataExportState | mailboxID | metadata_export.mailbox_id | metadata_export_identity | String |  | yes | TEXT |  |
+|  | Mailbox generation | MetadataExportState | uidValidity | metadata_export.uid_validity | metadata_export_identity | Integer 64 |  | yes | INTEGER |  |
+|  | Mailbox-local IMAP UID | MetadataExportState | uid | metadata_export.uid | metadata_export_identity | Integer 64 |  | yes | INTEGER |  |
+|  | Persisted canonical UTC email date | MetadataExportState | emailDate | metadata_export.email_date | metadata_export_ready | Date |  | yes | INTEGER UTC Unix milliseconds |  |
+|  | Globally allocated revision reserved when accepting the fetched input snapshot | MetadataExportState | sourceVersion | metadata_export.source_version | metadata_export_ready | Integer 64 |  | yes | INTEGER |  |
+| 1 | Normalized metadata file schema version | MetadataExportState | resultSchemaVersion | metadata_export.result_schema_version |  | Integer 32 |  | yes | INTEGER |  |
+|  | Integrity-checked file beneath the account intermediate directory | MetadataExportState | resultRelativePath | metadata_export.result_relative_path |  | String |  | yes | TEXT |  |
+|  | Digest of the immutable normalized metadata file | MetadataExportState | resultFingerprint | metadata_export.result_fingerprint |  | String |  | yes | TEXT |  |
+| pending | pending exporting retryWaiting exported or blocked | MetadataExportState | state | metadata_export.state | metadata_export_ready | String |  | yes | TEXT |  |
+|  | Current claim token used to fence acknowledgement and failure saves | MetadataExportState | batchID | metadata_export.batch_id | metadata_export_batch | UUID |  | no | TEXT |  |
+| 0 | Claimed export attempts for this revision | MetadataExportState | attemptCount | metadata_export.attempt_count |  | Integer 32 |  | yes | INTEGER |  |
+| 5 | Bounded retry ceiling | MetadataExportState | maximumAttempts | metadata_export.maximum_attempts |  | Integer 32 |  | yes | INTEGER |  |
+|  | Backoff deadline | MetadataExportState | nextAttemptAt | metadata_export.next_attempt_at | metadata_export_ready | Date |  | no | INTEGER UTC Unix milliseconds |  |
+|  | Owning exporter process session | MetadataExportState | leaseOwner | metadata_export.lease_owner |  | String |  | no | TEXT |  |
+|  | Expired claim may be replayed | MetadataExportState | leaseExpiresAt | metadata_export.lease_expires_at | metadata_export_lease | Date |  | no | INTEGER UTC Unix milliseconds |  |
+|  | Highest acknowledged claimed revision | MetadataExportState | exportedVersion | metadata_export.exported_version |  | Integer 64 |  | no | INTEGER |  |
+|  | Acknowledged email-metadata DuckDB schema version | MetadataExportState | duckDBSchemaVersion | metadata_export.duckdb_schema_version |  | Integer 32 |  | no | INTEGER |  |
+|  | SQLite acknowledgement time following the DuckDB commit | MetadataExportState | exportedAt | metadata_export.exported_at |  | Date |  | no | INTEGER UTC Unix milliseconds |  |
+|  | Stable metadata exporter error | MetadataExportState | lastErrorCode | metadata_export.last_error_code |  | String |  | no | TEXT |  |
+|  | Sanitized diagnostic | MetadataExportState | lastErrorMessage | metadata_export.last_error_message |  | String |  | no | TEXT |  |
+|  | Checkpoint creation timestamp | MetadataExportState | createdAt | metadata_export.created_at |  | Date |  | yes | INTEGER UTC Unix milliseconds |  |
+|  | Last durable checkpoint mutation | MetadataExportState | updatedAt | metadata_export.updated_at |  | Date |  | yes | INTEGER UTC Unix milliseconds |  |
+|  | Initial metadata observation timestamp retained across refreshes | MetadataExportState | firstSeenAt | metadata_export.first_seen_at |  | Date |  | yes | INTEGER UTC Unix milliseconds |  |
+|  | Canonical date provenance retained across refreshes: internal_date sent_at or first_metadata_fetched_at | MetadataExportState | emailDateSource | metadata_export.email_date_source |  | String |  | yes | TEXT |  |
+| analytics | Singleton shared SQLite analytical revision allocator | AnalyticalRevisionSequence | name | revision_sequence.name | revision_sequence | String |  | yes | TEXT | revision_sequence |
+| 1 | Reserve and increment atomically with accepted inputs or corrections; block on Int64 exhaustion | AnalyticalRevisionSequence | nextValue | revision_sequence.next_value |  | Integer 64 |  | yes | INTEGER |  |
 
 ### 03 Email Processing API Contract
 
@@ -1541,9 +1712,9 @@ Language-neutral pipeline definitions, requests, snapshots, and events. Source: 
 
 ```ts
 /**
- * Language-neutral design reference for the Core Data email-processing
- * pipeline. Production code uses equivalent Swift Sendable values, actors,
- * async functions, and NSManagedObjectID boundaries.
+ * Language-neutral design reference for the SQLite email-processing
+ * pipeline. Production Rust code uses owned snapshots, stable row IDs,
+ * session-owned workers, and explicit SQL transactions.
  */
 
 export type AccountID = string;
@@ -1552,7 +1723,7 @@ export type ProcessingJobID = string;
 export type ProcessingStepID = string;
 export type ISO8601DateTime = string;
 
-/** Same metadata-only envelope as the Swift transformer input. */
+/** Same metadata-only envelope as the Rust transformer input. */
 export interface NormalizedEmailMetadata {
   schemaVersion: number;
   /** Positive Int64 decimal string; identifies the accepted metadata snapshot. */
@@ -1639,7 +1810,7 @@ export interface ProcessingJobSnapshot {
 }
 
 export interface ProcessingStepSnapshot {
-  stepObjectID: string;
+  stepID: string;
   jobID: ProcessingJobID;
   stepID: ProcessingStepID;
   transformerName: string;
@@ -1702,7 +1873,7 @@ export interface StartProcessingRequest {
 }
 
 /**
- * A small actor-backed coordinator. Core Data remains the source of truth;
+ * A small worker-backed coordinator. SQLite remains the source of truth;
  * this interface does not imply an external queue or general workflow engine.
  */
 export interface EmailProcessingPipeline {
@@ -1715,190 +1886,103 @@ export interface EmailProcessingPipeline {
 }
 ```
 
-### 04 Swift Transformer Contract
+### 04 Rust Transformer Contract
 
-Typed Sendable transformers, erased registration, and official versus custom status. Source: [email-transformer.swift](../design-meta/examples/processing/email-transformer.swift).
+Typed Send + Sync Rust transformers, erased registration, and official versus custom status. Source: [email-transformer.rs](../design-meta/examples/processing/email-transformer.rs).
 
-#### Swift Transformer Contract
+#### Rust Transformer Contract
 
-```txt
-import Foundation
+```rust
+//! Rust-internal design sketch; not the public C ABI. No external dependencies.
+use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 
-/// The only transformer outcomes that affect pipeline scheduling.
-public enum TransformerOfficialStatus: String, Codable, Sendable {
-    case succeeded
-    case retry
-    case failed
-    case skipped
+pub type WorkFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
+#[derive(Clone, Debug)]
+pub enum OfficialStatus { Succeeded, Retry, Failed, Skipped }
+#[derive(Clone, Debug)]
+pub enum PersistedOutput { None, Json(String), Binary(Vec<u8>), Utf8(String) }
+pub struct TransformerResult<T> {
+    pub status: OfficialStatus,
+    pub custom_status: Option<String>,
+    pub message: Option<String>,
+    pub output: Option<T>,
 }
-
-public enum PersistedTransformerOutput: Sendable {
-    case none
-    case json(Data)
-    case binary(Data)
-    case utf8(Data)
+pub struct NormalizedEmailMetadata {
+    pub schema_version: i32,
+    pub source_version: i64,
+    pub canonical_json: String, // validated metadata only, no message bodies
 }
-
-public struct TransformerResult<Output: Sendable>: Sendable {
-    public let status: TransformerOfficialStatus
-    public let customStatus: String?
-    public let message: String?
-    public let output: Output?
-
-    public init(
-        status: TransformerOfficialStatus,
-        customStatus: String? = nil,
-        message: String? = nil,
-        output: Output? = nil
-    ) {
-        self.status = status
-        self.customStatus = customStatus
-        self.message = message
-        self.output = output
+pub struct TransformerInput {
+    pub account_id: String,
+    pub mailbox_id: String,
+    pub uid_validity: u32,
+    pub email_uid: u32,
+    pub email_date_unix_ms: i64,
+    pub metadata: NormalizedEmailMetadata,
+    pub idempotency_key: String,
+    pub dependency_outputs: BTreeMap<String, PersistedOutput>,
+}
+pub trait EmailTransformer: Send + Sync + 'static {
+    type Output: Send;
+    fn name(&self) -> &str; // durable name; renaming requires SQL migration
+    fn version(&self) -> i32;
+    fn output_schema_version(&self) -> i32;
+    fn transform(&self, input: TransformerInput) -> WorkFuture<'_, TransformerResult<Self::Output>>;
+    fn encode(&self, output: Self::Output) -> Result<PersistedOutput, String>;
+}
+pub struct EncodedResult {
+    pub status: OfficialStatus,
+    pub custom_status: Option<String>,
+    pub message: Option<String>,
+    pub output: PersistedOutput,
+    pub output_schema_version: i32,
+}
+pub trait ErasedTransformer: Send + Sync {
+    fn name(&self) -> &str;
+    fn version(&self) -> i32;
+    fn output_schema_version(&self) -> i32;
+    fn run(&self, input: TransformerInput) -> WorkFuture<'_, EncodedResult>;
+}
+pub struct TypedAdapter<T: EmailTransformer>(pub T);
+impl<T: EmailTransformer> ErasedTransformer for TypedAdapter<T> {
+    fn name(&self) -> &str { self.0.name() }
+    fn version(&self) -> i32 { self.0.version() }
+    fn output_schema_version(&self) -> i32 { self.0.output_schema_version() }
+    fn run(&self, input: TransformerInput) -> WorkFuture<'_, EncodedResult> {
+        Box::pin(async move {
+            let result = self.0.transform(input).await?;
+            let output = match result.output {
+                Some(value) => self.0.encode(value)?,
+                None => PersistedOutput::None,
+            };
+            Ok(EncodedResult { status: result.status, custom_status: result.custom_status,
+                message: result.message, output,
+                output_schema_version: self.0.output_schema_version() })
+        })
     }
 }
-
-/// Normalized metadata only; message bodies and attachment bytes are excluded.
-public struct NormalizedEmailMetadata: Sendable {
-    public let schemaVersion: Int32
-    public let sourceVersion: Int64
-    public let canonicalJSON: Data
-}
-
-/// Immutable Sendable input assembled from Core Data and a verified metadata file.
-public struct TransformerInput: Sendable {
-    public let accountID: String
-    public let mailboxID: String
-    public let uidValidity: Int64
-    public let emailUID: Int64
-    public let emailDate: Date
-    public let metadata: NormalizedEmailMetadata
-    public let idempotencyKey: String
-    public let dependencyOutputs: [String: PersistedTransformerOutput]
-}
-
-/// Strongly typed implementation interface.
-public protocol EmailTransformer: Sendable {
-    associatedtype Output: Sendable
-
-    /// Durable identifier. Once released, changing this requires data migration.
-    static var name: String { get }
-    static var version: Int { get }
-    static var outputSchemaVersion: Int { get }
-
-    func transform(_ input: TransformerInput) async throws -> TransformerResult<Output>
-
-    /// Converts typed output into the only transformer-specific persisted field.
-    func encodeForPersistence(_ output: Output) throws -> PersistedTransformerOutput
-}
-
-/// Optional convenience protocol for implementations that do not suspend.
-public protocol SynchronousEmailTransformer: EmailTransformer {
-    func transformSynchronously(
-        _ input: TransformerInput
-    ) throws -> TransformerResult<Output>
-}
-
-public extension SynchronousEmailTransformer {
-    func transform(_ input: TransformerInput) async throws -> TransformerResult<Output> {
-        try transformSynchronously(input)
-    }
-}
-
-/// Library-internal normalized result returned through the registry boundary.
-public struct EncodedTransformerResult: Sendable {
-    public let status: TransformerOfficialStatus
-    public let customStatus: String?
-    public let message: String?
-    public let output: PersistedTransformerOutput
-    public let outputSchemaVersion: Int
-}
-
-/// Type erasure keeps implementations strongly typed while allowing one registry.
-public struct AnyEmailTransformer: Sendable {
-    public let name: String
-    public let version: Int
-    public let outputSchemaVersion: Int
-
-    private let run: @Sendable (TransformerInput) async throws -> EncodedTransformerResult
-
-    public init<T: EmailTransformer>(_ transformer: T) {
-        name = T.name
-        version = T.version
-        outputSchemaVersion = T.outputSchemaVersion
-        run = { input in
-            let result = try await transformer.transform(input)
-            let output = try result.output.map(transformer.encodeForPersistence) ?? .none
-            return EncodedTransformerResult(
-                status: result.status,
-                customStatus: result.customStatus,
-                message: result.message,
-                output: output,
-                outputSchemaVersion: T.outputSchemaVersion
-            )
-        }
-    }
-
-    public func transform(_ input: TransformerInput) async throws -> EncodedTransformerResult {
-        try await run(input)
-    }
-}
-
-public enum TransformerRegistryError: Error, Equatable {
-    case invalidName(String)
-    case invalidVersion(String)
-    case duplicateName(String)
-    case missingTransformer(String)
-    case incompatibleVersion(String, expected: Int, actual: Int)
-    case incompatibleOutputSchema(String, expected: Int, actual: Int)
-}
-
-/// Immutable registry injected when the library is initialized.
-public struct TransformerRegistry: Sendable {
-    private let transformersByName: [String: AnyEmailTransformer]
-
-    public init(_ transformers: [AnyEmailTransformer]) throws {
-        var indexed: [String: AnyEmailTransformer] = [:]
-
-        for transformer in transformers {
-            let name = transformer.name
-            guard !name.isEmpty, name == name.trimmingCharacters(in: .whitespacesAndNewlines) else {
-                throw TransformerRegistryError.invalidName(name)
+pub struct TransformerRegistry(BTreeMap<String, Arc<dyn ErasedTransformer>>);
+impl TransformerRegistry {
+    pub fn new(items: Vec<Arc<dyn ErasedTransformer>>) -> Result<Self, String> {
+        let mut map = BTreeMap::new();
+        for item in items {
+            let name = item.name().to_owned();
+            if name.is_empty() || name.trim() != name || item.version() <= 0
+                || item.output_schema_version() <= 0 {
+                return Err("transformer.invalid-contract".into());
             }
-            guard transformer.version > 0, transformer.version <= Int(Int32.max),
-                  transformer.outputSchemaVersion > 0,
-                  transformer.outputSchemaVersion <= Int(Int32.max) else {
-                throw TransformerRegistryError.invalidVersion(name)
-            }
-            guard indexed[name] == nil else {
-                throw TransformerRegistryError.duplicateName(name)
-            }
-            indexed[name] = transformer
+            if map.insert(name, item).is_some() { return Err("transformer.duplicate".into()); }
         }
-
-        transformersByName = indexed
+        Ok(Self(map))
     }
-
-    /// Resolve before claiming work; incompatible persisted contracts are blocked.
-    public func resolve(
-        name: String,
-        version: Int,
-        outputSchemaVersion: Int
-    ) throws -> AnyEmailTransformer {
-        guard let transformer = transformersByName[name] else {
-            throw TransformerRegistryError.missingTransformer(name)
+    /// Resolve before claiming work; mismatch blocks without consuming attempts.
+    pub fn resolve(&self, name: &str, version: i32, schema: i32)
+        -> Result<Arc<dyn ErasedTransformer>, String> {
+        let item = self.0.get(name).ok_or("transformer.missing")?;
+        if item.version() != version || item.output_schema_version() != schema {
+            return Err("transformer.incompatible-contract".into());
         }
-        guard transformer.version == version else {
-            throw TransformerRegistryError.incompatibleVersion(
-                name, expected: version, actual: transformer.version
-            )
-        }
-        guard transformer.outputSchemaVersion == outputSchemaVersion else {
-            throw TransformerRegistryError.incompatibleOutputSchema(
-                name, expected: outputSchemaVersion, actual: transformer.outputSchemaVersion
-            )
-        }
-        return transformer
+        Ok(Arc::clone(item))
     }
 }
 ```
@@ -1915,8 +1999,8 @@ Eligibility, claims, idempotent upserts, acknowledgements, and archival recovery
 
 | area | rationale | requirement | rule_id |
 | --- | --- | --- | --- |
-| Architecture | Prevents transformation code from owning analytical persistence or transaction policy | Implement DuckDBExporter as a dedicated actor or service that is separate from all transformers. | exporter.boundary |
-| Architecture | Makes dual-store recovery deterministic | Keep Core Data as the operational source of truth and treat DuckDB rows as replayable downstream projections. | exporter.source_of_truth |
+| Architecture | Prevents transformation code from owning analytical persistence or transaction policy | Implement DuckDBExporter as a dedicated worker service that is separate from all transformers. | exporter.boundary |
+| Architecture | Makes dual-store recovery deterministic | Keep SQLite as the operational source of truth and treat DuckDB rows as replayable downstream projections. | exporter.source_of_truth |
 | Architecture | Keeps live analytics aligned with future Parquet files | Use the core and extension columns in email_metadata_parquet_columns.csv for the email_metadata_live DuckDB table. | exporter.metadata_schema |
 | Architecture | Avoids changing the one-row-per-message grain of email metadata | Store processing results in a separate row-per-transformer table defined by duckdb_processing_export_tables.csv. | exporter.result_schema |
 | Eligibility | Prevents analysis of results that may still change during ordinary execution | Export steps only after their parent job reaches succeeded succeededWithWarnings or failed. | eligibility.job |
@@ -1924,24 +2008,24 @@ Eligibility, claims, idempotent upserts, acknowledgements, and archival recovery
 | Eligibility | Allows explicit corrections while retaining idempotency | Create or reset export state to pending whenever a stable step result receives a higher sourceVersion. | eligibility.version |
 | Identity | Avoids collisions between mailboxes | Always use accountID mailboxID UIDVALIDITY and emailUID as the durable IMAP message key. | identity.message |
 | Identity | Supports deterministic per-transformer upserts | Use the durable message key plus transformerName and transformerVersion as the processing-result conflict key. | identity.result |
-| Batching | Bounds Core Data memory and DuckDB transaction duration | Make batch size configurable with a conservative default such as 250 results. | batch.configuration |
+| Batching | Bounds SQLite memory and DuckDB transaction duration | Make batch size configurable with a conservative default such as 250 results. | batch.configuration |
 | Batching | Makes retries and diagnostics reproducible | Select eligible export states by emailDate accountID mailboxID uidValidity emailUID transformerName transformerVersion and sourceVersion. | batch.ordering |
-| Batching | Prevents duplicate normal scheduling and makes claims recoverable | Claim a batch in one Core Data background-context save by setting exporting batchID leaseOwner leaseExpiresAt and incrementing attemptCount. | batch.claim |
-| Batching | Prevents managed objects from crossing concurrency boundaries | Convert claimed managed objects into immutable Sendable row values inside their Core Data context before calling DuckDB. | batch.snapshot |
+| Batching | Prevents duplicate normal scheduling and makes claims recoverable | Claim a batch in one SQLite SQLite transaction by setting exporting batchID leaseOwner leaseExpiresAt and incrementing attemptCount. | batch.claim |
+| Batching | Prevents live database connections from crossing worker boundaries | Convert claimed SQL rows into immutable owned Rust snapshots inside their SQLite transaction before calling DuckDB. | batch.snapshot |
 | Transactions | Avoids partially committed analytical batches | Execute all parameterized upserts for one batch inside a single DuckDB transaction and roll back the entire batch on any row failure. | transaction.duckdb |
 | Transactions | Makes replay safe and prevents stale overwrites | Upsert only if the incoming sourceVersion is strictly newer; equal or newer destination versions are acknowledged no-ops, and equal versions must represent the same immutable snapshot. | transaction.conflict |
-| Transactions | Records the downstream checkpoint only after durable destination success | After DuckDB commits acknowledge only the claimed source versions whose batchID still matches; leave a newer Core Data revision pending and never clear a replacement claim or correction. | transaction.ack |
-| Crash recovery | Closes the unavoidable two-database commit gap without distributed transactions | If DuckDB commits but the Core Data acknowledgement does not then reclaim the expired Core Data batch and replay the same upserts. | recovery.commit_gap |
-| Crash recovery | Allows recovery after the commit gap | Treat a replayed no-op upsert with an equal or newer destination sourceVersion as success and acknowledge it in Core Data. | recovery.verify |
-| Crash recovery | Preserves the source-of-truth boundary | Never infer Core Data operational state from DuckDB and never roll Core Data back because DuckDB is unavailable. | recovery.no_reverse |
+| Transactions | Records the downstream checkpoint only after durable destination success | After DuckDB commits acknowledge only the claimed source versions whose batchID still matches; leave a newer SQLite revision pending and never clear a replacement claim or correction. | transaction.ack |
+| Crash recovery | Closes the unavoidable two-database commit gap without distributed transactions | If DuckDB commits but the SQLite acknowledgement does not then reclaim the expired SQLite batch and replay the same upserts. | recovery.commit_gap |
+| Crash recovery | Allows recovery after the commit gap | Treat a replayed no-op upsert with an equal or newer destination sourceVersion as success and acknowledge it in SQLite. | recovery.verify |
+| Crash recovery | Preserves the source-of-truth boundary | Never infer SQLite operational state from DuckDB and never roll SQLite back because DuckDB is unavailable. | recovery.no_reverse |
 | Retries | Separates transient availability from operator-required failures | Retry DuckDB busy I/O interruption and transient filesystem failures with bounded exponential backoff; block schema corruption incompatible schema and invalid rows. | retry.classification |
 | Retries | Allows other valid rows to progress without silently dropping data | When a deterministic row error prevents a batch commit isolate the bad row by splitting the batch and record its stable error. | retry.batch_split |
 | Writing | Provides safe simple writes for v1 | Use prepared parameterized insert-on-conflict statements for normal batches and never construct SQL by interpolating values. | write.parameterized |
 | Writing | Avoids premature bulk-ingestion complexity | Allow a future DuckDB appender path only after measured batch volume justifies it and preserve identical transaction and conflict semantics. | write.appender |
 | Payloads | Balances queryability and output flexibility | Persist stable common analytical values as typed DuckDB columns and transformer-specific output as JSON when it is useful for analysis. | payload.columns |
 | Payloads | Prevents unnecessary analytical database growth | Avoid exporting opaque binary output by default; include output_binary only when configured and analytically justified. | payload.binary |
-| Concurrency | Matches DuckDB write behavior and simplifies ordering | Use one DuckDBExporter actor per account database with an explicit in-flight batch gate across awaits; the destination serializes writer transactions including metadata projection migrations and archive claims. | concurrency.actor |
-| Concurrency | Preserves Core Data queue confinement | Use private-queue Core Data contexts and exchange only object IDs or immutable Sendable snapshots. | concurrency.coredata |
+| Concurrency | Matches DuckDB write behavior and simplifies ordering | Use one DuckDBExporter worker per account database with exclusive mutable ownership for each complete batch; the destination serializes writer transactions including metadata projection migrations and archive claims. | concurrency.worker |
+| Concurrency | Preserves connection and transaction ownership | Use session-owned SQLite connections and exchange only stable row IDs or immutable owned Rust snapshots. | concurrency.sqlite |
 | Concurrency | Avoids readers observing half-applied maintenance | Allow DuckDB analytical readers while coordinating schema migration archive claims and writer transactions through the exporter layer. | concurrency.readers |
 | Archive | Preserves recent queryability | Keep successfully projected rows in the live DuckDB tables until they are eligible for monthly Parquet archival. | archive.live |
 | Archive | Creates a durable immutable archive snapshot | In one DuckDB transaction copy eligible live rows into the exporting table with an archive batch ID and remove those exact source versions from live. | archive.claim |
@@ -1949,20 +2033,20 @@ Eligibility, claims, idempotent upserts, acknowledgements, and archival recovery
 | Archive | Makes restart behavior independent of changing live rows | Write and verify Parquet exclusively from one archive batch in the exporting table. | archive.write |
 | Archive | Ensures only successfully archived staging rows are deleted | After verified atomic Parquet publication commit the archive manifest and delete the corresponding exporting rows in one DuckDB transaction. | archive.success |
 | Archive | Prevents data loss | On Parquet failure retain exporting rows and the batch manifest for retry. | archive.failure |
-| Archive | Clarifies that deletion belongs to successful DuckDB to Parquet archival | Never delete newly projected live rows merely because the Core Data to DuckDB export succeeded. | archive.deletion_scope |
-| Schema evolution | Makes migrations and replay compatibility observable | Version the DuckDB processing-result schema independently and store the applied version with each Core Data acknowledgement and archive manifest. | schema.version |
+| Archive | Clarifies that deletion belongs to successful DuckDB to Parquet archival | Never delete newly projected live rows merely because the SQLite to DuckDB export succeeded. | archive.deletion_scope |
+| Schema evolution | Makes migrations and replay compatibility observable | Version the DuckDB processing-result schema independently and store the applied version with each SQLite acknowledgement and archive manifest. | schema.version |
 | Schema evolution | Prevents mixed-schema batches | Apply ordered transactional DuckDB migrations before claiming export work and stop export when the destination version is unsupported. | schema.migration |
 | Schema evolution | Keeps the analytical schema stable | Prefer additive nullable analytical columns and keep transformer-specific evolution inside versioned JSON until a field is promoted. | schema.additive |
 | Schema evolution | Allows direct DuckDB to Parquet projection | Preserve compatible core names and types in DuckDB and Parquet; convert extensions JSON into MAP<STRING, STRING> entries containing canonical JSON values, as for email metadata. | schema.parquet |
 | Identity | Makes the existing row-per-transformer result key unambiguous | A pipeline uses each transformer name at most once; the analytical dataset keeps the latest accepted result for each message transformerName and transformerVersion rather than every historical pipeline execution. | identity.transformer |
 | Versioning | Destination conflict keys can span multiple operational jobs | Allocate positive Int64 source revisions from the shared durable AnalyticalRevisionSequence before accepting a new input snapshot or correction; never reset the revision when a new job or step is created. | version.sequence |
 | Batching | Prevents expired executors from clearing newer work | Claim leases cover all work in the batch or are renewed before expiry; acknowledgements and failure updates are fenced by batchID and claimed sourceVersion. | batch.lease |
-| Retries | A secondary Core Data failure must not hide the primary export error | Attempt to persist the export failure without replacing the original error if that save fails; retain the durable claim for expiry-based recovery. | retry.failure_record |
+| Retries | A secondary SQLite failure must not hide the primary export error | Attempt to persist the export failure without replacing the original error if that save fails; retain the durable claim for expiry-based recovery. | retry.failure_record |
 | Archive | Moving rows to staging must not make queries lose messages | Include exporting snapshots in both logical datasets until Parquet is committed; deduplicate by complete logical key and newest sourceVersion across live exporting archive and correction rows. | archive.query_visibility |
 | Archive | The two row grains cannot share one manifest path or schema field | Use separate dataset-specific archive batches manifests paths schema versions and counts for email_metadata and processing_results. | archive.dataset |
 | Archive | Atomic filesystem publication and a DuckDB transaction are separate commits | Track exporting published committed and failed manifest states; after restart verify an already published file by digest schema and counts before committing its manifest and deleting staging. | archive.publish_gap |
 | Archive | Prevents replacing a monthly file with only a subset of its rows | Initial archival publishes the complete claimed month per dataset; later replacement is correction compaction of the prior committed partition plus fixed overlay revisions, never a partial batch overwriting the full month. | archive.replace |
-| Architecture | Separates the sample scope from the required complete period projection | Use MetadataExportState checkpoints for normalized metadata rows with the same claim revision acknowledgement and replay rules as ProcessingResultExportState; the Swift sample below demonstrates only processing-result export. | projection.metadata |
+| Architecture | Separates the sample scope from the required complete period projection | Use MetadataExportState checkpoints for normalized metadata rows with the same claim revision acknowledgement and replay rules as ProcessingResultExportState; the Rust sample below demonstrates only processing-result export. | projection.metadata |
 | Archive | One logical monthly file must not expose a replacement through an old committed manifest during the filesystem commit gap | Publish each archive or compaction to an immutable batch-specific Parquet path; in the manifest commit transaction mark exactly one generation current per dataset account mailbox month and retire the previous generation only after its readers release it. | archive.generations |
 
 ### 02 DuckDB Processing Export Tables
@@ -1974,34 +2058,34 @@ Live results, immutable exporting snapshots, and archive manifests. Source: [duc
 | column_id | column_name | description | duckdb_type | key_role | nullable | source | tables |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | result.schema_version | schema_version | Destination processing-result schema version | INTEGER |  | no | Exporter | live\|exporting |
-| result.account_id | account_id | Stable account identifier | VARCHAR | message_key;result_key | no | Core Data EmailProcessingJob | live\|exporting |
-| result.mailbox_id | mailbox_id | Stable mailbox identifier required for IMAP UID identity | VARCHAR | message_key;result_key | no | Core Data EmailProcessingJob | live\|exporting |
-| result.uid_validity | uid_validity | IMAP UIDVALIDITY | BIGINT | message_key;result_key | no | Core Data EmailProcessingJob | live\|exporting |
-| result.email_uid | email_uid | Mailbox-local IMAP UID | BIGINT | message_key;result_key | no | Core Data EmailProcessingJob | live\|exporting |
-| result.email_date | email_date | Canonical UTC email date for filtering and monthly archival | TIMESTAMPTZ |  | no | Core Data EmailProcessingJob | live\|exporting |
-| result.pipeline_id | pipeline_id | Pipeline identifier that produced the result | VARCHAR |  | no | Core Data EmailProcessingJob | live\|exporting |
-| result.pipeline_version | pipeline_version | Pipeline graph version | INTEGER |  | no | Core Data EmailProcessingJob | live\|exporting |
-| result.job_id | job_id | Operational job identifier for traceability | UUID |  | no | Core Data EmailProcessingJob | live\|exporting |
-| result.job_state | job_state | Stable terminal job state | VARCHAR |  | no | Core Data EmailProcessingJob | live\|exporting |
-| result.job_completed_at | job_completed_at | Job terminal timestamp | TIMESTAMPTZ |  | no | Core Data EmailProcessingJob | live\|exporting |
-| result.step_id | step_id | Pipeline node identifier | VARCHAR |  | no | Core Data EmailProcessingStep | live\|exporting |
-| result.transformer_name | transformer_name | Durable transformer name | VARCHAR | result_key | no | Core Data EmailProcessingStep | live\|exporting |
-| result.transformer_version | transformer_version | Transformer implementation version | INTEGER | result_key | no | Core Data EmailProcessingStep | live\|exporting |
-| result.step_state | step_state | Stable terminal step state | VARCHAR |  | no | Core Data EmailProcessingStep | live\|exporting |
-| result.official_status | official_status | Library-defined transformer status | VARCHAR |  | yes | Core Data EmailProcessingStep | live\|exporting |
-| result.custom_status | custom_status | Optional transformer-defined analytical status | VARCHAR |  | yes | Core Data EmailProcessingStep | live\|exporting |
-| result.status_message | status_message | Optional human-readable transformer message | VARCHAR |  | yes | Core Data EmailProcessingStep | live\|exporting |
-| result.attempt_count | attempt_count | Attempts consumed by the stable result | INTEGER |  | no | Core Data EmailProcessingStep | live\|exporting |
-| result.output_encoding | output_encoding | Persisted output encoding | VARCHAR |  | yes | Core Data EmailProcessingStep | live\|exporting |
-| result.output_schema_version | output_schema_version | Transformer-specific output schema version | INTEGER |  | yes | Core Data EmailProcessingStep | live\|exporting |
-| result.output_json | output_json | Transformer-specific JSON payload; core analytical state never belongs here | JSON |  | yes | Core Data EmailProcessingStep | live\|exporting |
-| result.output_binary | output_binary | Non-JSON payload retained only when analytically justified | BLOB |  | yes | Core Data EmailProcessingStep | live\|exporting |
-| result.failure_code | failure_code | Stable processing failure code | VARCHAR |  | yes | Core Data EmailProcessingStep | live\|exporting |
-| result.failure_message | failure_message | Sanitized processing failure summary | VARCHAR |  | yes | Core Data EmailProcessingStep | live\|exporting |
-| result.input_fingerprint | input_fingerprint | Digest of inputs consumed by the transformer | VARCHAR |  | no | Core Data EmailProcessingStep | live\|exporting |
+| result.account_id | account_id | Stable account identifier | VARCHAR | message_key;result_key | no | SQLite EmailProcessingJob | live\|exporting |
+| result.mailbox_id | mailbox_id | Stable mailbox identifier required for IMAP UID identity | VARCHAR | message_key;result_key | no | SQLite EmailProcessingJob | live\|exporting |
+| result.uid_validity | uid_validity | IMAP UIDVALIDITY | BIGINT | message_key;result_key | no | SQLite EmailProcessingJob | live\|exporting |
+| result.email_uid | email_uid | Mailbox-local IMAP UID | BIGINT | message_key;result_key | no | SQLite EmailProcessingJob | live\|exporting |
+| result.email_date | email_date | Canonical UTC email date for filtering and monthly archival | TIMESTAMPTZ |  | no | SQLite EmailProcessingJob | live\|exporting |
+| result.pipeline_id | pipeline_id | Pipeline identifier that produced the result | VARCHAR |  | no | SQLite EmailProcessingJob | live\|exporting |
+| result.pipeline_version | pipeline_version | Pipeline graph version | INTEGER |  | no | SQLite EmailProcessingJob | live\|exporting |
+| result.job_id | job_id | Operational job identifier for traceability | UUID |  | no | SQLite EmailProcessingJob | live\|exporting |
+| result.job_state | job_state | Stable terminal job state | VARCHAR |  | no | SQLite EmailProcessingJob | live\|exporting |
+| result.job_completed_at | job_completed_at | Job terminal timestamp | TIMESTAMPTZ |  | no | SQLite EmailProcessingJob | live\|exporting |
+| result.step_id | step_id | Pipeline node identifier | VARCHAR |  | no | SQLite EmailProcessingStep | live\|exporting |
+| result.transformer_name | transformer_name | Durable transformer name | VARCHAR | result_key | no | SQLite EmailProcessingStep | live\|exporting |
+| result.transformer_version | transformer_version | Transformer implementation version | INTEGER | result_key | no | SQLite EmailProcessingStep | live\|exporting |
+| result.step_state | step_state | Stable terminal step state | VARCHAR |  | no | SQLite EmailProcessingStep | live\|exporting |
+| result.official_status | official_status | Library-defined transformer status | VARCHAR |  | yes | SQLite EmailProcessingStep | live\|exporting |
+| result.custom_status | custom_status | Optional transformer-defined analytical status | VARCHAR |  | yes | SQLite EmailProcessingStep | live\|exporting |
+| result.status_message | status_message | Optional human-readable transformer message | VARCHAR |  | yes | SQLite EmailProcessingStep | live\|exporting |
+| result.attempt_count | attempt_count | Attempts consumed by the stable result | INTEGER |  | no | SQLite EmailProcessingStep | live\|exporting |
+| result.output_encoding | output_encoding | Persisted output encoding | VARCHAR |  | yes | SQLite EmailProcessingStep | live\|exporting |
+| result.output_schema_version | output_schema_version | Transformer-specific output schema version | INTEGER |  | yes | SQLite EmailProcessingStep | live\|exporting |
+| result.output_json | output_json | Transformer-specific JSON payload; core analytical state never belongs here | JSON |  | yes | SQLite EmailProcessingStep | live\|exporting |
+| result.output_binary | output_binary | Non-JSON payload retained only when analytically justified | BLOB |  | yes | SQLite EmailProcessingStep | live\|exporting |
+| result.failure_code | failure_code | Stable processing failure code | VARCHAR |  | yes | SQLite EmailProcessingStep | live\|exporting |
+| result.failure_message | failure_message | Sanitized processing failure summary | VARCHAR |  | yes | SQLite EmailProcessingStep | live\|exporting |
+| result.input_fingerprint | input_fingerprint | Digest of inputs consumed by the transformer | VARCHAR |  | no | SQLite EmailProcessingStep | live\|exporting |
 | result.output_fingerprint | output_fingerprint | Digest of the exported payload | VARCHAR |  | yes | Exporter | live\|exporting |
-| result.source_version | source_version | Globally allocated immutable accepted-result revision; shared sequence prevents resets across jobs | BIGINT | conflict_version | no | Core Data ProcessingResultExportState | live\|exporting |
-| result.source_updated_at | source_updated_at | Last Core Data result update timestamp | TIMESTAMPTZ |  | no | Core Data EmailProcessingStep | live\|exporting |
+| result.source_version | source_version | Globally allocated immutable accepted-result revision; shared sequence prevents resets across jobs | BIGINT | conflict_version | no | SQLite ProcessingResultExportState | live\|exporting |
+| result.source_updated_at | source_updated_at | Last SQLite result update timestamp | TIMESTAMPTZ |  | no | SQLite EmailProcessingStep | live\|exporting |
 | result.exported_from_core_data_at | exported_from_core_data_at | Exporter timestamp bound once for the batch before its upsert transaction; not the exact commit time | TIMESTAMPTZ |  | no | Exporter | live\|exporting |
 | result.extensions | extensions | Future values as DuckDB JSON; Parquet uses a MAP of string keys to canonical JSON values | JSON |  | no | Exporter | live\|exporting |
 | archive.batch_id | archive_batch_id | Stable DuckDB to Parquet archive batch identifier | UUID | archive_batch | no | Archive coordinator | exporting |
@@ -2025,187 +2109,88 @@ Live results, immutable exporting snapshots, and archive manifests. Source: [duc
 | manifest.is_current | is_current | False until commit; exactly one committed manifest is current per dataset account mailbox month | BOOLEAN |  | no | Archive coordinator | archive_manifest |
 | manifest.supersedes_batch_id | supersedes_batch_id | Previous current generation replaced by verified correction compaction; null for initial publication | UUID |  | yes | Archive coordinator | archive_manifest |
 
-### 03 Swift DuckDB Exporter Contract
+### 03 Rust DuckDB Exporter Contract
 
-Actor boundary, immutable row snapshots, store protocols, and batch acknowledgements. Source: [duckdb-exporter.swift](../design-meta/examples/storage/duckdb-exporter.swift).
+Serialized worker boundary, immutable row snapshots, store traits, and batch acknowledgements. Source: [duckdb-exporter.rs](../design-meta/examples/storage/duckdb-exporter.rs).
 
-#### Swift DuckDB Exporter Contract
+#### Rust DuckDB Exporter Contract
 
-```txt
-import CoreData
-import Foundation
+```rust
+//! Blocking adapter sketch run on a session-owned database worker, never a UI thread.
+//! Actual adapters must enforce all row mappings in duckdb_processing_export_tables.csv.
+use std::time::Duration;
 
-public struct DuckDBExporterConfiguration: Sendable {
-    public let batchSize: Int
-    public let maximumAttempts: Int
-    public let leaseDuration: Duration
-
-    public init(
-        batchSize: Int = 250,
-        maximumAttempts: Int = 5,
-        leaseDuration: Duration = .seconds(120)
-    ) {
-        precondition(batchSize > 0)
-        precondition(maximumAttempts > 0)
-        precondition(leaseDuration > .zero)
-        self.batchSize = batchSize
-        self.maximumAttempts = maximumAttempts
-        self.leaseDuration = leaseDuration
+pub struct ProcessingResultRow {
+    pub step_id: String, // stable UUID primary key, not a managed-object URI
+    pub account_id: String,
+    pub mailbox_id: String,
+    pub uid_validity: u32,
+    pub email_uid: u32,
+    pub transformer_name: String,
+    pub transformer_version: i32,
+    pub source_version: i64,
+    pub canonical_projection_json: String, // immutable validated column snapshot
+}
+pub struct ExportBatch { pub id: String, pub rows: Vec<ProcessingResultRow> }
+pub struct ExportReport {
+    pub batch_id: Option<String>,
+    pub selected: usize,
+    pub committed: usize,
+    pub replayed: usize,
+}
+pub struct ExportConfiguration {
+    pub batch_size: usize,
+    pub maximum_attempts: u32,
+    pub lease_duration: Duration,
+}
+impl Default for ExportConfiguration {
+    fn default() -> Self {
+        Self { batch_size: 250, maximum_attempts: 5, lease_duration: Duration::from_secs(120) }
     }
 }
-
-/// Immutable projection assembled inside a Core Data context.
-public struct DuckDBProcessingResultRow: Sendable {
-    public let accountID: String
-    public let mailboxID: String
-    public let uidValidity: Int64
-    public let emailUID: Int64
-    public let emailDate: Date
-    public let pipelineID: String
-    public let pipelineVersion: Int32
-    public let jobID: UUID
-    public let jobState: String
-    public let jobCompletedAt: Date
-    public let stepID: String
-    public let transformerName: String
-    public let transformerVersion: Int32
-    public let stepState: String
-    public let officialStatus: String?
-    public let customStatus: String?
-    public let statusMessage: String?
-    public let attemptCount: Int32
-    public let outputEncoding: String?
-    public let outputSchemaVersion: Int32?
-    public let outputJSON: Data?
-    public let outputBinary: Data?
-    public let failureCode: String?
-    public let failureMessage: String?
-    public let inputFingerprint: String
-    public let outputFingerprint: String?
-    public let sourceVersion: Int64
-    public let sourceUpdatedAt: Date
-    public let extensionsJSON: Data
+pub trait ExportDestination: Send {
+    fn prepare_schema(&mut self) -> Result<i32, String>;
+    /// One parameterized DuckDB transaction, serialized with other account writers.
+    /// Equal/newer stored revisions succeed as no-ops, counted as replayed.
+    fn upsert(&mut self, rows: &[ProcessingResultRow]) -> Result<usize, String>;
 }
-
-public struct DuckDBExportBatch: Sendable {
-    public let id: UUID
-    public let rows: [DuckDBProcessingResultRow]
+pub trait ExportStateStore: Send {
+    /// Claim and snapshot atomically in SQLite. No transaction spans DuckDB work.
+    fn claim(&mut self, config: &ExportConfiguration) -> Result<Option<ExportBatch>, String>;
+    /// Fence each update by batch ID and immutable source version; preserve newer pending work.
+    fn acknowledge(&mut self, batch: &ExportBatch, schema_version: i32) -> Result<(), String>;
+    /// Same fencing; diagnostics must not mask the primary error.
+    fn record_failure(&mut self, batch: &ExportBatch, error: &str) -> Result<(), String>;
 }
-
-public struct DuckDBExportReport: Sendable {
-    public let batchID: UUID?
-    public let selectedCount: Int
-    public let committedCount: Int
-    public let replayedCount: Int
+pub struct DuckDBExporter<S, D> {
+    pub state_store: S,
+    pub destination: D,
+    pub configuration: ExportConfiguration,
 }
-
-/// Adapter implemented by the embedded DuckDB bridge.
-public protocol DuckDBExportDestination: Sendable {
-    /// Open/migrate/validate the destination before an operational claim is made.
-    func prepareSchema() async throws -> Int32
-
-    /// One parameterized transaction; return the number of inserted/changed rows.
-    /// Equal/newer destination revisions are successful no-ops. Every row is
-    /// acknowledged only after the transaction commits. The adapter serializes
-    /// this writer with metadata projection, migrations, and archive claims.
-    func upsertProcessingResults(
-        _ rows: [DuckDBProcessingResultRow]
-    ) async throws -> Int
-}
-
-/// Core Data remains authoritative; this store only manages export checkpoints.
-public protocol ProcessingExportStateStore: Sendable {
-    func claimBatch(
-        limit: Int,
-        maximumAttempts: Int,
-        leaseDuration: Duration
-    ) async throws -> DuckDBExportBatch?
-
-    /// Acknowledge only batch.id and its immutable claimed source versions;
-    /// preserve a newer revision as pending and never clear another batch claim.
-    func acknowledge(
-        batch: DuckDBExportBatch,
-        duckDBSchemaVersion: Int32,
-        exportedAt: Date
-    ) async throws
-
-    /// Fence by batch.id and sourceVersion; never overwrite a replacement claim.
-    func recordFailure(
-        batch: DuckDBExportBatch,
-        error: Error
-    ) async throws
-}
-
-public enum DuckDBExporterError: Error, Equatable {
-    case batchInProgress
-    case invalidDestinationCount(Int)
-}
-
-/// Processing-result export sketch. Period metadata export uses its own
-/// MetadataExportState adapter with identical checkpoint and replay semantics.
-public actor DuckDBExporter {
-    private let stateStore: any ProcessingExportStateStore
-    private let destination: any DuckDBExportDestination
-    private let configuration: DuckDBExporterConfiguration
-    private var batchInProgress = false
-
-    public init(
-        stateStore: any ProcessingExportStateStore,
-        destination: any DuckDBExportDestination,
-        configuration: DuckDBExporterConfiguration = .init()
-    ) {
-        self.stateStore = stateStore
-        self.destination = destination
-        self.configuration = configuration
-    }
-
-    /// Exports at most one batch. Replaying a claimed batch is always safe.
-    public func exportNextBatch() async throws -> DuckDBExportReport {
-        // An actor can reenter during awaits; retain this gate for the whole batch.
-        guard !batchInProgress else { throw DuckDBExporterError.batchInProgress }
-        batchInProgress = true
-        defer { batchInProgress = false }
-
-        let schemaVersion = try await destination.prepareSchema()
-        guard let batch = try await stateStore.claimBatch(
-            limit: configuration.batchSize,
-            maximumAttempts: configuration.maximumAttempts,
-            leaseDuration: configuration.leaseDuration
-        ) else {
-            return DuckDBExportReport(
-                batchID: nil,
-                selectedCount: 0,
-                committedCount: 0,
-                replayedCount: 0
-            )
+impl<S: ExportStateStore, D: ExportDestination> DuckDBExporter<S, D> {
+    /// Exclusive mutable ownership serializes batches for this worker.
+    /// Metadata projection uses a separate adapter with the same replay contract.
+    pub fn export_next_batch(&mut self) -> Result<ExportReport, String> {
+        if self.configuration.batch_size == 0 || self.configuration.maximum_attempts == 0
+            || self.configuration.lease_duration.is_zero() {
+            return Err("export.invalid-configuration".into());
         }
-
-        do {
-            let committed = try await destination.upsertProcessingResults(batch.rows)
-            guard (0...batch.rows.count).contains(committed) else {
-                throw DuckDBExporterError.invalidDestinationCount(committed)
-            }
-            try await stateStore.acknowledge(
-                batch: batch,
-                duckDBSchemaVersion: schemaVersion,
-                exportedAt: Date()
-            )
-            return DuckDBExportReport(
-                batchID: batch.id,
-                selectedCount: batch.rows.count,
-                committedCount: committed,
-                replayedCount: batch.rows.count - committed
-            )
-        } catch {
-            let originalError = error
-            do {
-                try await stateStore.recordFailure(batch: batch, error: originalError)
-            } catch {
-                // The durable claim remains recoverable after lease expiry.
-                // A failure to save diagnostics must not replace the primary error.
-            }
-            throw originalError
+        let schema = self.destination.prepare_schema()?;
+        let Some(batch) = self.state_store.claim(&self.configuration)? else {
+            return Ok(ExportReport { batch_id: None, selected: 0, committed: 0, replayed: 0 });
+        };
+        let outcome: Result<ExportReport, String> = (|| {
+            let committed = self.destination.upsert(&batch.rows)?;
+            if committed > batch.rows.len() { return Err("export.invalid-count".into()); }
+            self.state_store.acknowledge(&batch, schema)?;
+            Ok(ExportReport { batch_id: Some(batch.id.clone()), selected: batch.rows.len(),
+                committed, replayed: batch.rows.len() - committed })
+        })();
+        if let Err(ref error) = outcome {
+            let _ = self.state_store.record_failure(&batch, error);
+            // Failed diagnostics leave the claim recoverable after lease expiry.
         }
+        outcome
     }
 }
 ```
@@ -2611,8 +2596,8 @@ Message/MIME-part selection, transformation, progress, content leases, and clean
  * Language-neutral design reference for SeleneTide on-demand email fetching.
  *
  * TypeScript keeps the contract concise. The production API will use
- * equivalent Swift Sendable values, async functions, AsyncSequence events,
- * file URLs, and cooperative cancellation.
+ * owned Rust snapshots and session workers; host adapters map operation IDs
+ * and event polling to async operations and cooperative cancellation.
  */
 
 import type {
@@ -2771,7 +2756,7 @@ export interface CleanupExpiredOptions {
 export interface FetchEmailClient {
   /**
    * Starts a fetch and returns once its durable operation record exists in the
-   * offline Core Data workflow store.
+   * offline SQLite workflow store.
    */
   start(request: FetchEmailRequest): Promise<FetchSnapshot>;
 
@@ -2887,7 +2872,7 @@ Coarse-grained unit and integration suites to implement against the design contr
 
 Each row is a planned test suite with a stable ID, level, area, title, description, and specification note references. These entries describe coverage to implement; they do not report implemented or passing tests. Source: [test_catalog.csv](../design-meta/examples/testing/test_catalog.csv).
 
-Unit suites use controlled clocks, deterministic fixtures, and isolated collaborators. Integration suites exercise real temporary Core Data/DuckDB stores and filesystem artifacts, scripted IMAP/provider responses, and injected failures at persistence boundaries. Use disposable Keychain items for platform authentication checks; ordinary tests do not require personal accounts or live providers.
+Unit suites use controlled clocks, deterministic fixtures, and isolated collaborators. Integration suites exercise real temporary SQLite/DuckDB stores and filesystem artifacts, scripted IMAP/provider responses, and injected failures at persistence boundaries. Use caller-supplied test credentials for authentication checks; ordinary tests do not require personal accounts or live providers.
 
 Resource limits are parameters of the selected configuration. Tests for optional capabilities apply when those capabilities are implemented; migration, retention, provider setup, and platform tests need expectations from the remaining implementation decisions. The catalogue groups assertions into suites rather than prescribing one test method per row.
 
@@ -2898,7 +2883,7 @@ Resource limits are parameters of the selected configuration. Tests for optional
 | content | Use a controlled clock to check TTL expiry, explicit release, and while-in-use ownership without a wall-clock expiry. Unavailable results report expired/released status; cancelling completed fetches leaves their published lease active. | selenetide.content.api;selenetide.workflow.fields | unit.content.leases | unit | TTL and session-owned retention semantics |
 | content | Check positive safe-integer aggregate limits, known-size rejection, MIME parameters, and sanitized filenames. Managed output paths stay inside the owning account folder and unknown-length transfers stop at the configured aggregate ceiling. | selenetide.architecture.datastores;selenetide.content.api;selenetide.workflow.fields | unit.content.safety | unit | Transfer limits and managed artifact paths |
 | content | Validate raw-message, body, attachment, and selected-part requests against MIME structure, including the supplied multipart fixture. Check body preferences, inline resources, and optional Markdown only where those capabilities are implemented. | selenetide.content.api;selenetide.content.fixture | unit.content.selection | unit | On-demand MIME selection and transforms |
-| storage | Exercise newer, equal, and older source revisions plus stale batch owners. Only strictly newer rows change analytical values; acknowledging a claimed revision cannot clear a newer pending revision. | selenetide.export.rules;selenetide.export.swift;selenetide.processing.fields | unit.export.revisions | unit | Revision precedence and fenced acknowledgements |
+| storage | Exercise newer, equal, and older source revisions plus stale batch owners. Only strictly newer rows change analytical values; acknowledging a claimed revision cannot clear a newer pending revision. | selenetide.export.rules;selenetide.export.rust;selenetide.processing.fields | unit.export.revisions | unit | Revision precedence and fenced acknowledgements |
 | export | Check escaping, Unicode, nulls, timestamps, supported value encodings, and requested projections. Ordering includes stable logical-key or dimension tie-breakers so unchanged results produce identical export bytes. | selenetide.metadata.columns;selenetide.product.features;selenetide.query.rules | unit.export.serialization | unit | Deterministic CSV and JSON rendering |
 | metadata | Exercise INTERNALDATE, unambiguous Date header, and first-fetch fallback precedence across timezone and month boundaries. Refreshes preserve the first chosen date, provenance, and partition. | selenetide.metadata.columns;selenetide.metadata.imap;selenetide.workflow.rules | unit.metadata.canonical-date | unit | Stable canonical UTC dates |
 | metadata | Check account/mailbox/UIDVALIDITY/UID identity, UUID encoding, and lossless decimal Gmail IDs. Sequence numbers never become durable keys; Gmail correlation never replaces mailbox fetch identity. | selenetide.metadata.columns;selenetide.metadata.imap;selenetide.sync.api | unit.metadata.identity | unit | Durable message identity |
@@ -2915,14 +2900,13 @@ Resource limits are parameters of the selected configuration. Tests for optional
 | query | Accept documented request modes and literal-free operators/functions with source spans. Reject duplicate or unknown JSON keys, conflicting modes, malformed collections, expression literals, and excessive configured token/depth limits. | selenetide.query.catalog;selenetide.query.rules | unit.query.syntax | unit | Query request and expression parsing |
 | sync | Check UTC ranges, task identities, stage dependencies, and complete closed-month eligibility using a controlled clock. Open months and partial or multi-month plans omit archive stages and can complete after projection verification. | selenetide.sync.api;selenetide.workflow.rules;selenetide.workflow.stages | unit.sync.plan | unit | Deterministic period plans and archive eligibility |
 | sync | Check deterministic task keys across page replay and independent account/mailbox generations. Period coverage is keyed by UTC range and generation; the highest observed UID alone never proves another date range complete. | selenetide.workflow.fields;selenetide.workflow.rules;selenetide.workflow.stages | unit.sync.task-identity | unit | Idempotent task keys and range coverage |
-| accounts | Use controlled Keychain items and scripted providers to exercise configured authentication and OAuth refresh paths, including Gmail setup when implemented. Locked or unavailable Keychain access fails deterministically in headless macOS; secrets do not appear in files, logs, events, or exports. | selenetide.architecture.datastores;selenetide.product.features | integration.accounts.authentication | integration | Credential and provider authentication boundaries |
-| accounts | Configure two accounts with overlapping mailbox UIDs, then sync, process, query, and reopen their stores. Non-secret settings persist in shared Core Data while rows, DuckDB files, archives, and temporary artifacts stay scoped to the owning account. | selenetide.architecture.datastores;selenetide.product.features;selenetide.workflow.fields | integration.accounts.isolation | integration | Account isolation and persistent configuration |
-| architecture | Open a temporary library root from competing processes and verify only one owns the operational store for its lifetime. Release after shutdown or termination permits recovery; actors alone cannot authorize a second process writer. | selenetide.architecture.datastores;selenetide.workflow.rules | integration.architecture.ownership | integration | Exclusive process writer ownership |
-| cli | Run macOS account, plan/start/resume/inspect/refresh, fetch/cleanup, and CSV/JSON export commands against isolated fixtures. Library state survives command boundaries; deterministic machine output and meaningful exit statuses cover success, blocked work, cancellation, and credential failure without GUI prompts. | selenetide.content.api;selenetide.product.features;selenetide.sync.api | integration.cli.automation | integration | Headless command workflows and machine output |
+| accounts | Use scripted IMAP providers for PLAIN XOAUTH2 OAUTHBEARER and SCRAM-SHA-256. Reject empty multiple and malformed mechanism selections unsupported capabilities invalid TLS and bad credentials. Replace expired tokens through the API; reconnect uses new credentials and no secret appears in SQLite files logs events or exports. | selenetide.architecture.datastores;selenetide.product.features | integration.accounts.authentication | integration | Credential and provider authentication boundaries |
+| accounts | Configure two accounts with overlapping mailbox UIDs, then sync, process, query, and reopen their stores. Non-secret settings persist in shared SQLite while rows, DuckDB files, archives, and temporary artifacts stay scoped to the owning account. | selenetide.architecture.datastores;selenetide.product.features;selenetide.workflow.fields | integration.accounts.isolation | integration | Account isolation and persistent configuration |
+| architecture | Open a temporary library root from competing processes and verify only one owns the operational store for its lifetime. Release after shutdown or termination permits recovery; workers alone cannot authorize a second process writer. | selenetide.architecture.datastores;selenetide.workflow.rules | integration.architecture.ownership | integration | Exclusive process writer ownership |
 | content | Publish TTL and while-in-use content, restart or shut down its owner session, and run cleanup. TTL expiry and session release remove only eligible artifacts; active leases retain access, released/expired results fail deterministically, and cancelling completed fetches does not release their result. | selenetide.content.api;selenetide.workflow.fields | integration.content.cleanup | integration | Lease cleanup across sessions and completed cancellations |
 | content | Confirm metadata synchronization requests headers/structure without body bytes, then explicitly fetch supported complete or selective MIME content from a scripted server. Persist selection/transform options across restart; check aggregate streaming limits, cancellation, safe paths, complete publication, and abandoned partial cleanup. | selenetide.content.api;selenetide.content.fixture;selenetide.workflow.fields;selenetide.workflow.stages | integration.content.fetch | integration | Explicit content downloads and atomic artifact publication |
 | maintenance | Once explicit migration and retention policies exist, reopen historical fixtures and prune eligible history/artifacts. Preserve latest identity/date checkpoints, referenced immutable inputs, and valid reusable outputs; incompatible stores require the chosen explicit migration or rejection path. | selenetide.architecture.datastores;selenetide.metadata.columns;selenetide.processing.rules;selenetide.workflow.rules | integration.maintenance.migration | integration | Store migration and dependency-safe pruning |
-| platform | After pinning deployment targets and the native bridge, compile/link supported macOS and iOS arm64 device/simulator configurations in CI. Exercise library initialization, Core Data, async cancellation, DuckDB queries, and Parquet round-trips without unsupported dynamic dependencies. | selenetide.architecture.datastores;selenetide.product.features | integration.platform.embedded-engine | integration | Embedded engine on supported Apple targets |
+| platform | After pinning targets and adapters compile and link the Rust core and C ABI on supported Linux Windows and macOS targets. Exercise SQLite DuckDB and Parquet without Apple frameworks or OS credential stores. | selenetide.architecture.datastores;selenetide.product.features | integration.platform.embedded-engine | integration | Portable Rust and embedded engine |
 | processing | Inject failure around result saves and required/optional outcomes, including work still running. Step state and complete output commit together; terminal jobs have no unfinished steps, required failure blocks period export, and warning-success proceeds only after all included jobs satisfy the gate. | selenetide.processing.fields;selenetide.processing.rules;selenetide.workflow.stages | integration.processing.atomicity | integration | Atomic results and period completion gates |
 | processing | Reopen pending jobs with missing or version/schema-mismatched registrations and confirm blocking occurs before an attempt is claimed. Compatible prior results are copied with valid output and audit identity; incompatible inputs or schemas execute only through an explicit supported new contract. | selenetide.processing.fields;selenetide.processing.rules;selenetide.processing.transformer | integration.processing.compatibility | integration | Resume compatibility and result reuse |
 | processing | Persist normalized input envelopes before scheduling and restart before execution. Transformers receive the same verified schema, revision, locator, fingerprint, and metadata; missing or corrupt inputs fail through the documented contract instead of using mutable current metadata. | selenetide.processing.fields;selenetide.processing.rules;selenetide.processing.transformer | integration.processing.inputs | integration | Persisted metadata snapshots and artifact integrity |
@@ -2931,14 +2915,17 @@ Resource limits are parameters of the selected configuration. Tests for optional
 | storage | Update an archived month while archive/compaction work and readers are active. Replacement contains the prior full partition plus fixed overlay revisions, retains concurrent newer corrections, commits exactly one current immutable generation, and keeps retired files until their readers release them. | selenetide.export.rules;selenetide.export.tables;selenetide.query.rules | integration.storage.archive-corrections | integration | Correction compaction and reader-safe generations |
 | storage | Inject failures at claim, write, verification, atomic publication, and manifest/staging commit boundaries, then reopen. Invalid files never become current; published files are reverified before finalization, and failed or interrupted batches retain recoverable queryable rows. | selenetide.export.rules;selenetide.export.tables;selenetide.workflow.rules | integration.storage.archive-recovery | integration | Archive publication and manifest crash boundaries |
 | storage | Archive a complete closed month for both datasets while querying before, during, and after publication. Live and exporting snapshots remain visible without duplicates; separate manifests, counts, paths, and schema versions agree with verified Parquet types and extension values. | selenetide.export.rules;selenetide.export.tables;selenetide.metadata.columns;selenetide.query.rules | integration.storage.archive-visibility | integration | Queryable archive snapshots and schema parity |
-| storage | Expire or replace an export claim while its executor is suspended, then accept a newer correction before the old acknowledgement. Batch and claimed-version fencing reject stale completion/failure updates and leave the newer revision exportable. | selenetide.export.rules;selenetide.export.swift;selenetide.processing.fields | integration.storage.claim-fencing | integration | Lease expiry and concurrent correction fencing |
-| storage | Project both metadata and processing results, interrupt after DuckDB commit but before Core Data acknowledgement, then reclaim and replay. Equal/newer destination rows are successful no-ops; all claimed snapshots are acknowledged without losing pending changes. | selenetide.export.rules;selenetide.export.swift;selenetide.workflow.rules | integration.storage.projection-replay | integration | Dual-store projection crash recovery |
+| storage | Expire or replace an export claim while its executor is suspended, then accept a newer correction before the old acknowledgement. Batch and claimed-version fencing reject stale completion/failure updates and leave the newer revision exportable. | selenetide.export.rules;selenetide.export.rust;selenetide.processing.fields | integration.storage.claim-fencing | integration | Lease expiry and concurrent correction fencing |
+| storage | Project both metadata and processing results, interrupt after DuckDB commit but before SQLite acknowledgement, then reclaim and replay. Equal/newer destination rows are successful no-ops; all claimed snapshots are acknowledged without losing pending changes. | selenetide.export.rules;selenetide.export.rust;selenetide.workflow.rules | integration.storage.projection-replay | integration | Dual-store projection crash recovery |
 | storage | Accept older and newer job inputs, finish them in reverse order, and restart between allocations. The shared durable sequence never resets per job or account; late older outputs cannot overwrite newer analytical state or correction revisions. | selenetide.export.rules;selenetide.processing.fields;selenetide.processing.rules | integration.storage.revision-order | integration | Monotonic revisions across jobs and restarts |
 | storage | Place conflicting revisions and tombstones for metadata and processing keys across live, exporting, archive, and overlay sources. Queries choose the newest revision before filtering deletions, so stale rows never resurrect deleted messages or results. | selenetide.export.rules;selenetide.export.tables;selenetide.query.rules | integration.storage.tombstones | integration | Latest-revision deduplication before deletions |
-| storage | Suspend exporters across actor awaits and contend with metadata writers, migration, and archival. Schema preparation precedes claims; a bad row rolls back the full batch, supported batch splitting isolates it, and failure-record save errors preserve the primary error while releasing the writer gate. | selenetide.export.rules;selenetide.export.swift;selenetide.export.tables | integration.storage.writer-failures | integration | Serialized DuckDB writes and transactional failures |
+| storage | Suspend exporters across worker suspension points and contend with metadata writers, migration, and archival. Schema preparation precedes claims; a bad row rolls back the full batch, supported batch splitting isolates it, and failure-record save errors preserve the primary error while releasing the writer gate. | selenetide.export.rules;selenetide.export.rust;selenetide.export.tables | integration.storage.writer-failures | integration | Serialized DuckDB writes and transactional failures |
 | sync | Cancel an active run, await cooperative stopping, then resume and subscribe to status/events. Completed work remains reusable, initial snapshots and events are ordered, and counters reconcile without double-counting replayed tasks or exposing content/secrets. | selenetide.product.features;selenetide.sync.api;selenetide.workflow.rules | integration.sync.cancellation | integration | Cancellation resume and replay-safe progress |
-| sync | Interrupt before and after the Core Data save that commits a page cursor and child tasks, then resume against a scripted IMAP server. No UIDs disappear or duplicate work; children from committed pages drain under bounded backpressure without waiting for all discovery to finish. | selenetide.workflow.fields;selenetide.workflow.rules;selenetide.workflow.stages | integration.sync.discovery | integration | Atomic discovery pages and bounded fan-out |
+| sync | Interrupt before and after the SQLite save that commits a page cursor and child tasks, then resume against a scripted IMAP server. No UIDs disappear or duplicate work; children from committed pages drain under bounded backpressure without waiting for all discovery to finish. | selenetide.workflow.fields;selenetide.workflow.rules;selenetide.workflow.stages | integration.sync.discovery | integration | Atomic discovery pages and bounded fan-out |
 | sync | Sync overlapping and disjoint UTC ranges with changed flags, new messages, moves, expunges, and a changed UIDVALIDITY. Candidate searches are filtered by canonical dates; range coverage and generation reconciliation neither skip messages nor confuse old UIDs with new identities. | selenetide.metadata.imap;selenetide.sync.api;selenetide.workflow.rules | integration.sync.reconciliation | integration | Date-range refresh and mailbox generation changes |
 | sync | Terminate during fetch, transformation, and retry waiting, reopen the persisted stores, and resume. Attempts, deadlines, input identities, and completed work survive; ambiguous external effects use the persisted idempotency key and reconciliation contract before retry. | selenetide.processing.rules;selenetide.sync.api;selenetide.workflow.rules | integration.sync.recovery | integration | Restart with retries and preserved completed work |
 | sync | Run multiple messages and dependent steps with suspended executors. Enforce independent configured message/step limits, preserve dependency ordering, and prevent duplicate execution through durable claims; reclaim expired leases while fencing late results. | selenetide.processing.fields;selenetide.processing.rules;selenetide.workflow.rules | integration.sync.scheduling | integration | Bounded scheduler concurrency and durable claims |
+| api | Check ABI versioning closed and stale handles malformed UTF-8 unknown methods schema versions size limits lossless integer encodings and authentication redaction. | selenetide.api.session;selenetide.api.rules;selenetide.architecture.datastores | unit.api.validation | unit | ABI JSON and handle validation |
+| api | Exercise open multiple calls concurrent polling auth replacement cancellation and close through a C consumer. Free each returned buffer once; verify connection reuse deterministic close root ownership and restart with durable checkpoints but no credentials. | selenetide.api.session;selenetide.api.rules;selenetide.architecture.datastores | integration.api.lifecycle | integration | Stateful session and C buffer ownership |
+| storage | Reopen supported schema versions and inject migration and transaction failures. Check foreign keys unique identities revision allocation rollback busy limits and account-scoped snapshots. | selenetide.api.session;selenetide.api.rules;selenetide.architecture.datastores | integration.sqlite.migrations | integration | SQL migrations and constraints |
 

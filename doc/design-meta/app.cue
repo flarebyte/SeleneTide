@@ -1,14 +1,14 @@
 package flyb
 
 // Canonical design model for the detailed specification and executive overview.
-// Unsupported Swift/EML extensions use text symlinks in render-inputs/.
+// Unsupported C-header/EML extensions use text symlinks in render-inputs/.
 source: "selenetide-design"
-name:   "SeleneTide Swift Library"
+name:   "SeleneTide Rust Library"
 modules: ["core"]
 
 // Shared statements keep the overview and detailed report aligned.
-_libraryPurpose:   "SeleneTide is a Swift library for macOS and iOS that brings IMAP message metadata into durable local storage. A macOS CLI exposes account, sync, fetch, and export operations for interactive and headless use."
-_storageAuthority: "Core Data owns durable operational state, including plans, tasks, checkpoints, processing jobs, step results, and export claims. Keychain owns credentials. Each account has its own analytical files and DuckDB database; DuckDB is a replayable projection of operational results, while Parquet holds verified historical datasets."
+_libraryPurpose:   "SeleneTide is a portable Rust library that brings IMAP message metadata into durable local storage. A frontend backend retains a stateful session through a C ABI; CLI features are deferred."
+_storageAuthority: "SQLite owns durable operational state, including plans, tasks, checkpoints, processing jobs, step results, and export claims. The caller supplies credentials, held only in session memory. Each account has its own analytical files and DuckDB database; DuckDB is a replayable projection of operational results, while Parquet holds verified historical datasets."
 
 argumentRegistry: {
 	version: "1"
@@ -22,18 +22,30 @@ argumentRegistry: {
 }
 
 reports: [{
-	title:       "SeleneTide Swift Library Specification"
+	title:       "SeleneTide Rust Library Specification"
 	filepath:    "../design/selenetide-specs.md"
 	description: "Requirements, architecture, persistence, and API contracts assembled from doc/design-meta/examples."
 	sections: [{
 		title:       "01 Overview"
-		description: "Purpose, Swift API conventions, and the relationship between the source artifacts."
+		description: "Purpose, Rust and C ABI conventions, and the relationship between the source artifacts."
 		sections: [{
 			title: "01 Library Scope"
 			notes: ["selenetide.overview.scope"]
 		}, {
 			title: "02 Architecture Summary"
 			notes: ["selenetide.overview.architecture"]
+		}, {
+			title: "03 Stateful Session and Authentication"
+			description: "JSON payload contracts and exactly-one mechanism examples. Source: [session-api.ts](../design-meta/examples/api/session-api.ts)."
+			notes: ["selenetide.api.session"]
+		}, {
+			title: "04 C ABI Contract"
+			description: "Public handle and buffer ownership contract. Source: [selenetide.h](../design-meta/examples/api/selenetide.h)."
+			notes: ["selenetide.api.c"]
+		}, {
+			title: "05 Session and Interop Rules"
+			description: "Lifecycle, concurrency, authentication, ABI, and SQL mappings. Source: [session_rules.csv](../design-meta/examples/api/session_rules.csv)."
+			notes: ["selenetide.api.rules"]
 		}]
 	}, {
 		title:       "02 Product Requirements"
@@ -41,7 +53,7 @@ reports: [{
 		sections: [
 			{
 				title:       "01 Feature Requirements"
-				description: "Required, recommended, and optional capabilities for the Swift library and macOS CLI. Source: [features.csv](../design-meta/examples/requirements/features.csv)."
+				description: "Required, recommended, and optional capabilities for the portable Rust library. Source: [features.csv](../design-meta/examples/requirements/features.csv)."
 				notes: ["selenetide.product.features"]
 			}, {
 				title:       "02 Practical Use Cases"
@@ -71,7 +83,7 @@ reports: [{
 				notes: ["selenetide.workflow.rules"]
 			}, {
 				title:       "05 Account and Workflow Persistence Fields"
-				description: "Swift-facing field shapes for accounts, plans, runs, tasks, checkpoints, and temporary content; Core Data storage follows the datastore and pipeline rules. Source: [coredata_workflow_fields.csv](../design-meta/examples/sync/coredata_workflow_fields.csv)."
+				description: "Logical persistence field shapes for accounts, plans, runs, tasks, checkpoints, and temporary content; SQLite storage follows the datastore and pipeline rules. Source: [sqlite_workflow_fields.csv](../design-meta/examples/sync/sqlite_workflow_fields.csv)."
 				notes: ["selenetide.workflow.fields"]
 			}, {
 				title:       "06 Sync API Contract"
@@ -94,7 +106,7 @@ reports: [{
 			},
 		]
 	}, {
-		title:       "05 Email Processing and Swift Transformers"
+		title:       "05 Email Processing and Rust Transformers"
 		description: "Code-defined processing graphs with durable results and restart recovery."
 		sections: [
 			{
@@ -102,16 +114,16 @@ reports: [{
 				description: "Dependency scheduling, official outcomes, retries, registry lookup, and result reuse. Source: [email_processing_pipeline_rules.csv](../design-meta/examples/processing/email_processing_pipeline_rules.csv)."
 				notes: ["selenetide.processing.rules"]
 			}, {
-				title:       "02 Core Data Processing and Export Fields"
-				description: "Jobs, steps, persisted outputs, leases, and versioned export checkpoints. Source: [coredata_email_pipeline_fields.csv](../design-meta/examples/processing/coredata_email_pipeline_fields.csv)."
+				title:       "02 SQLite Processing and Export Fields"
+				description: "Jobs, steps, persisted outputs, leases, and versioned export checkpoints. Source: [sqlite_email_pipeline_fields.csv](../design-meta/examples/processing/sqlite_email_pipeline_fields.csv)."
 				notes: ["selenetide.processing.fields"]
 			}, {
 				title:       "03 Email Processing API Contract"
 				description: "Language-neutral pipeline definitions, requests, snapshots, and events. Source: [email-processing-pipeline-api.ts](../design-meta/examples/processing/email-processing-pipeline-api.ts)."
 				notes: ["selenetide.processing.api"]
 			}, {
-				title:       "04 Swift Transformer Contract"
-				description: "Typed Sendable transformers, erased registration, and official versus custom status. Source: [email-transformer.swift](../design-meta/examples/processing/email-transformer.swift)."
+				title:       "04 Rust Transformer Contract"
+				description: "Typed Send + Sync Rust transformers, erased registration, and official versus custom status. Source: [email-transformer.rs](../design-meta/examples/processing/email-transformer.rs)."
 				notes: ["selenetide.processing.transformer"]
 			},
 		]
@@ -128,9 +140,9 @@ reports: [{
 				description: "Live results, immutable exporting snapshots, and archive manifests. Source: [duckdb_processing_export_tables.csv](../design-meta/examples/storage/duckdb_processing_export_tables.csv)."
 				notes: ["selenetide.export.tables"]
 			}, {
-				title:       "03 Swift DuckDB Exporter Contract"
-				description: "Actor boundary, immutable row snapshots, store protocols, and batch acknowledgements. Source: [duckdb-exporter.swift](../design-meta/examples/storage/duckdb-exporter.swift)."
-				notes: ["selenetide.export.swift"]
+				title:       "03 Rust DuckDB Exporter Contract"
+				description: "Serialized worker boundary, immutable row snapshots, store traits, and batch acknowledgements. Source: [duckdb-exporter.rs](../design-meta/examples/storage/duckdb-exporter.rs)."
+				notes: ["selenetide.export.rust"]
 			},
 		]
 	}, {
@@ -177,7 +189,7 @@ reports: [{
 			description: """
 				Each row is a planned test suite with a stable ID, level, area, title, description, and specification note references. These entries describe coverage to implement; they do not report implemented or passing tests. Source: [test_catalog.csv](../design-meta/examples/testing/test_catalog.csv).
 
-				Unit suites use controlled clocks, deterministic fixtures, and isolated collaborators. Integration suites exercise real temporary Core Data/DuckDB stores and filesystem artifacts, scripted IMAP/provider responses, and injected failures at persistence boundaries. Use disposable Keychain items for platform authentication checks; ordinary tests do not require personal accounts or live providers.
+				Unit suites use controlled clocks, deterministic fixtures, and isolated collaborators. Integration suites exercise real temporary SQLite/DuckDB stores and filesystem artifacts, scripted IMAP/provider responses, and injected failures at persistence boundaries. Use caller-supplied test credentials for authentication checks; ordinary tests do not require personal accounts or live providers.
 
 				Resource limits are parameters of the selected configuration. Tests for optional capabilities apply when those capabilities are implemented; migration, retention, provider setup, and platform tests need expectations from the remaining implementation decisions. The catalogue groups assertions into suites rather than prescribing one test method per row.
 				"""
@@ -194,7 +206,7 @@ reports: [{
 			description: """
 \(_libraryPurpose)
 
-The design supports multiple accounts, local metadata analytics, and resumable processing. Normal synchronization fetches headers, flags, dates, sizes, and MIME structure. Message bodies and attachments require an explicit on-demand request and remain disposable content. Swift concurrency is the intended API model; the code examples describe contracts for the future implementation.
+The design supports multiple accounts, local metadata analytics, and resumable processing. Normal synchronization fetches headers, flags, dates, sizes, and MIME structure. Message bodies and attachments require an explicit on-demand request and remain disposable content. Session handles, JSON requests, operation IDs, and event polling form the C ABI model; the code examples describe contracts for the future implementation.
 
 [Requirements and use cases](selenetide-specs.md#02-product-requirements).
 """
@@ -204,7 +216,7 @@ The design supports multiple accounts, local metadata analytics, and resumable p
 			description: """
 \(_storageAuthority)
 
-One application-local Core Data store isolates operational rows by account ID. Each account has separate analytical and artifact folders. An exclusive process writer lock coordinates apps, CLIs, and daemons; actors coordinate concurrent work within the owning process. Temporary content has a separate lease-managed lifecycle.
+One application-local SQLite store isolates operational rows by account ID. Each account has separate analytical and artifact folders. An exclusive portable process writer lock coordinates backend processes; Rust workers coordinate concurrent work within the owning process. Temporary content has a separate lease-managed lifecycle.
 
 [Datastores and authority](selenetide-specs.md#01-datastores-and-authority).
 """
@@ -227,7 +239,7 @@ One application-local Core Data store isolates operational rows by account ID. E
 				- Transformers have durable names and compatible versions. Reuse requires matching inputs and supported outputs; terminal jobs have no unfinished steps.
 				- Globally increasing source revisions prevent stale overwrites. Claims fence completion, and replay never loses newer work or double-counts progress.
 				- Queries combine live rows, exporting snapshots, archives, and corrections. Choose the newest revision before removing tombstones.
-				- Publish verified immutable file generations; retain the previous generation until replacement commits and readers release it. Secrets remain in Keychain.
+				- Publish verified immutable file generations; retain the previous generation until replacement commits and readers release it. Secrets remain only in session memory.
 
 				[Metadata schema](selenetide-specs.md#04-imap-metadata-and-schema), [processing rules](selenetide-specs.md#01-email-processing-pipeline-rules), and [export rules](selenetide-specs.md#01-duckdb-exporter-rules).
 				"""
@@ -235,15 +247,15 @@ One application-local Core Data store isolates operational rows by account ID. E
 		{
 			title: "05 Public API Boundaries"
 			description: """
-				[Sync](selenetide-specs.md#06-sync-api-contract) separates planning, execution, resumption, cancellation, status, and events. [Processing](selenetide-specs.md#03-email-processing-api-contract) supplies immutable metadata to registered Swift transformers and persists their versioned outputs. [Queries](selenetide-specs.md#07-constrained-analytics-queries) accept fixed logical datasets and a constrained expression language, compiled to parameterized SQL. [Content fetching](selenetide-specs.md#01-on-demand-email-fetch-api) explicitly selects messages or MIME parts and owns their temporary leases.
+				[Sync](selenetide-specs.md#06-sync-api-contract) separates planning, execution, resumption, cancellation, status, and events. [Processing](selenetide-specs.md#03-email-processing-api-contract) supplies immutable metadata to registered Rust transformers and persists their versioned outputs. [Queries](selenetide-specs.md#07-constrained-analytics-queries) accept fixed logical datasets and a constrained expression language, compiled to parameterized SQL. [Content fetching](selenetide-specs.md#01-on-demand-email-fetch-api) explicitly selects messages or MIME parts and owns their temporary leases.
 
-				Swift callers use Sendable values, async operations, progress sequences, and cooperative cancellation. The macOS CLI exposes account, sync, fetch, and export operations through these library boundaries.
+				The backend opens one session, supplies configuration and account authentication, then reuses its handle for JSON calls. The session owns runtime workers, database connections, and IMAP authentication state. Long operations return IDs for polling, paginated results, and cooperative cancellation. Close drains workers, releases connections, and clears secrets; reopening retains durable work but requires fresh authentication. Optional UniFFI bindings may provide typed host conveniences over the same Rust model.
 				"""
 		},
 		{
 			title: "06 Open Decisions and Next Reading"
 			description: """
-				Implementation choices still include minimum OS/Swift versions, the embedded DuckDB bridge and version, provider authentication details, resource ceilings, physical correction schemas, classification rules, retention, and migrations. Required-failure exclusions need a durable policy before being enabled.
+				Implementation choices still include the minimum Rust version and target matrix, the embedded SQLite/DuckDB adapters and versions, optional UniFFI target bindings, resource ceilings, physical correction schemas, classification rules, retention, and migrations. Required-failure exclusions need a durable policy before being enabled.
 
 				Use the [full specification](selenetide-specs.md) for implementation details and the [consistency review](../design-meta/consistency-review.md#remaining-implementation-choices) for unresolved decisions. This overview guides navigation; detailed rules, tables, and examples define the contract. Both reports are generated from the same flyb configuration.
 				"""
@@ -252,6 +264,23 @@ One application-local Core Data store isolates operational rows by account ID. E
 }]
 
 notes: [
+	{
+		name: "selenetide.api.c"
+		title: "C ABI Contract"
+		filepath: "render-inputs/selenetide.h.txt"
+		labels: ["c", "example"]
+	}, {
+		name: "selenetide.api.rules"
+		title: "Session and Interop Rules"
+		filepath: "examples/api/session_rules.csv"
+		arguments: ["format-csv=table"]
+		labels: ["csv", "example"]
+	}, {
+		name: "selenetide.api.session"
+		title: "Stateful Session and Authentication"
+		filepath: "examples/api/session-api.ts"
+		labels: ["example", "typescript"]
+	},
 	{
 		name:     "selenetide.architecture.datastores"
 		title:    "Datastores and Authority"
@@ -285,10 +314,10 @@ notes: [
 		labels: ["csv", "example"]
 	},
 	{
-		name:     "selenetide.export.swift"
-		title:    "Swift DuckDB Exporter Contract"
-		filepath: "render-inputs/duckdb-exporter.swift.txt"
-		labels: ["example", "swift"]
+		name:     "selenetide.export.rust"
+		title:    "Rust DuckDB Exporter Contract"
+		filepath: "examples/storage/duckdb-exporter.rs"
+		labels: ["example", "rust"]
 	},
 	{
 		name:     "selenetide.export.tables"
@@ -329,13 +358,13 @@ notes: [
 	},
 	{
 		name:     "selenetide.overview.scope"
-		title:    "Scope and Swift API Conventions"
+		title:    "Scope and Rust/C ABI Conventions"
 		markdown: """
 			\(_libraryPurpose)
 
-			The specification covers account isolation and Keychain credentials; metadata-only synchronization; resumable period workflows; versioned per-email transformers; Core Data to DuckDB projection; monthly Parquet archival; constrained analytics; and explicitly requested temporary content.
+			The specification covers account isolation and caller-supplied authentication; metadata-only synchronization; resumable period workflows; versioned per-email transformers; SQLite to DuckDB projection; monthly Parquet archival; constrained analytics; and explicitly requested temporary content.
 
-			TypeScript files are language-neutral API sketches. The production Swift surface uses immutable Sendable values, async operations, AsyncSequence progress events, and cooperative cancellation. Swift examples define native transformer and exporter boundaries; they are design contracts rather than a complete library implementation.
+			TypeScript files are language-neutral API sketches. The Rust core uses owned Send + Sync snapshots and session-owned workers. The public C ABI uses opaque session tokens and versioned UTF-8 JSON; host adapters map operation IDs and event polling to async conveniences. Rust examples define native transformer and exporter boundaries; they are design contracts rather than a complete library implementation.
 
 			This document is generated from `doc/design-meta/app.cue` and every source example. Edit those sources and regenerate with `flyb validate --config doc/design-meta` followed by `flyb generate markdown --config doc/design-meta`.
 
@@ -351,8 +380,8 @@ notes: [
 	},
 	{
 		name:     "selenetide.processing.fields"
-		title:    "Core Data Processing and Export Fields"
-		filepath: "examples/processing/coredata_email_pipeline_fields.csv"
+		title:    "SQLite Processing and Export Fields"
+		filepath: "examples/processing/sqlite_email_pipeline_fields.csv"
 		arguments: ["format-csv=table"]
 		labels: ["csv", "example"]
 	},
@@ -365,9 +394,9 @@ notes: [
 	},
 	{
 		name:     "selenetide.processing.transformer"
-		title:    "Swift Transformer Contract"
-		filepath: "render-inputs/email-transformer.swift.txt"
-		labels: ["example", "swift"]
+		title:    "Rust Transformer Contract"
+		filepath: "examples/processing/email-transformer.rs"
+		labels: ["example", "rust"]
 	},
 	{
 		name:     "selenetide.product.features"
@@ -425,7 +454,7 @@ notes: [
 	{
 		name:     "selenetide.workflow.fields"
 		title:    "Account and Workflow Persistence Fields"
-		filepath: "examples/sync/coredata_workflow_fields.csv"
+		filepath: "examples/sync/sqlite_workflow_fields.csv"
 		arguments: ["format-csv=table"]
 		labels: ["csv", "example"]
 	},
@@ -483,7 +512,7 @@ relationships: [
 		labels: ["reads"]
 	},
 	{
-		from:  "selenetide.export.swift"
+		from:  "selenetide.export.rust"
 		to:    "selenetide.export.rules"
 		label: "implements"
 		labels: ["implements"]

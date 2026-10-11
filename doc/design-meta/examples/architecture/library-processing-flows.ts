@@ -11,11 +11,12 @@ export type FlowStep = {
 /** Library initialization and durable-work recovery. */
 export const initializationFlow: FlowStep[] = [
   {
-    from: "AppOrCLI",
+    from: "FrontendBackend",
     to: "SeleneTideLibrary",
     action: "initialize",
-    data: ["configuration", "transformers"],
-    notes: "Acquire exclusive process writer ownership for the shared Core Data store before starting recovery.",
+    data: ["configuration"],
+    notes: "Frontend retains the returned session handle. Rust-internal transformers are registered before recovery.",
+
   },
   {
     from: "SeleneTideLibrary",
@@ -33,19 +34,20 @@ export const initializationFlow: FlowStep[] = [
   },
   {
     from: "SeleneTideLibrary",
-    to: "CoreDataStore",
-    action: "loadPersistentStoresAndMigrate",
-    data: ["coreDataModelVersion"],
+    to: "SQLiteStore",
+    action: "openAndMigrate",
+    data: ["sqliteSchemaVersion"],
   },
   {
     from: "SeleneTideLibrary",
     to: "DuckDBStore",
     action: "openAndMigrate",
     data: ["duckDBSchemaVersion"],
+    when: "the account first needs analytics; connections remain session-owned",
   },
   {
     from: "WorkflowCoordinator",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "findRecoverableWork",
     data: ["expiredLeases", "pendingTasks", "retryDueTasks", "blockedTasks"],
   },
@@ -57,7 +59,7 @@ export const initializationFlow: FlowStep[] = [
   },
   {
     from: "WorkflowCoordinator",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "markBlocked",
     data: ["failureCode=transformer.missing"],
     when: "a historical persisted transformer name is not registered",
@@ -67,26 +69,26 @@ export const initializationFlow: FlowStep[] = [
     from: "WorkflowCoordinator",
     to: "WorkflowCoordinator",
     action: "resumeEligibleWork",
-    when: "stores and current pipeline definitions are valid",
+    when: "stores and pipeline definitions are valid; network tasks wait for caller-supplied authentication",
   },
 ];
 
 /** Complete account/mailbox/period workflow, normally for one UTC month. */
 export const periodProcessingFlow: FlowStep[] = [
   {
-    from: "AppOrCLI",
+    from: "FrontendBackend",
     to: "SyncClient",
     action: "plan",
     data: ["accountID", "mailboxes", "period", "mode"],
   },
   {
     from: "SyncClient",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "persistPeriodPlan",
     data: ["periodStart", "periodEndExclusive", "partitionMonth"],
   },
   {
-    from: "AppOrCLI",
+    from: "FrontendBackend",
     to: "WorkflowCoordinator",
     action: "startPlan",
     data: ["planID"],
@@ -106,7 +108,7 @@ export const periodProcessingFlow: FlowStep[] = [
   },
   {
     from: "WorkflowCoordinator",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "persistDiscoveryPageAndFanOut",
     data: ["discoveryCursor", "metadataFetchTasks"],
     notes: "Cursor and idempotent child tasks commit atomically; child tasks run immediately so bounded discovery can drain.",
@@ -133,7 +135,7 @@ export const periodProcessingFlow: FlowStep[] = [
   },
   {
     from: "EmailProcessingPipeline",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "persistTerminalJob",
     data: ["processingJobID", "jobState", "stepResults"],
     notes: "Per-email jobs may execute concurrently under configured limits.",
@@ -174,7 +176,7 @@ export const periodProcessingFlow: FlowStep[] = [
   },
   {
     from: "WorkflowCoordinator",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "completePeriodRun",
     data: ["finalCounters", "periodCheckpoint", "finishedAt"],
     notes: "Open-month and partial/multi-month range runs complete after projection verification without archive stages.",
@@ -191,13 +193,13 @@ export const emailTransformationFlow: FlowStep[] = [
   },
   {
     from: "EmailProcessingPipeline",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "loadJobAndSteps",
     data: ["pipelineVersion", "stepStates", "dependencyOutputs"],
   },
   {
     from: "EmailProcessingPipeline",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "reuseCompatibleResults",
     data: ["transformerName", "transformerVersion", "inputFingerprint", "outputSchemaVersion"],
     when: "a valid succeeded result already exists",
@@ -211,7 +213,7 @@ export const emailTransformationFlow: FlowStep[] = [
   },
   {
     from: "EmailProcessingPipeline",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "claimReadySteps",
     data: ["leaseOwner", "leaseExpiresAt", "attemptCount"],
     notes: "The scheduler serializes claims; independent claimed dependency branches execute concurrently.",
@@ -231,43 +233,43 @@ export const emailTransformationFlow: FlowStep[] = [
   },
   {
     from: "EmailProcessingPipeline",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "commitStepResultAtomically",
     data: ["stepState", "officialStatus", "customStatus", "statusMessage", "outputData", "timestamps"],
     notes: "The terminal state and persisted output become visible in the same save.",
   },
   {
     from: "EmailProcessingPipeline",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "scheduleRetry",
     data: ["nextAttemptAt", "attemptCount", "failureCode"],
     when: "officialStatus is retry and attempts remain",
   },
   {
     from: "EmailProcessingPipeline",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "finishJob",
     data: ["succeeded", "succeededWithWarnings", "failed"],
     when: "every instantiated step is terminal and required-step outcomes determine success or failure",
   },
 ];
 
-/** Idempotent Core Data to DuckDB export, including the dual-commit crash gap. */
+/** Idempotent SQLite to DuckDB export, including the dual-commit crash gap. */
 export const duckDBProjectionRecoveryFlow: FlowStep[] = [
   {
     from: "DuckDBExporter",
     to: "DuckDBStore",
     action: "prepareSchema",
-    notes: "Open migrate and validate before claiming Core Data work; retain the in-flight gate across awaits.",
+    notes: "Open migrate and validate before claiming SQLite work; retain the in-flight gate across awaits.",
   },
   {
     from: "DuckDBExporter",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "claimStableResultBatch",
     data: ["batchID", "leaseOwner", "leaseExpiresAt", "sourceVersions"],
   },
   {
-    from: "CoreDataStore",
+    from: "SQLiteStore",
     to: "DuckDBExporter",
     action: "returnImmutableRows",
     data: ["metadataRows", "processingResultRows"],
@@ -291,7 +293,7 @@ export const duckDBProjectionRecoveryFlow: FlowStep[] = [
   },
   {
     from: "DuckDBExporter",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "acknowledgeExport",
     data: ["batchID", "claimedSourceVersions", "exportedAt", "duckDBSchemaVersion"],
     notes: "Fence by batchID and preserve newer source revisions as pending.",
@@ -300,11 +302,11 @@ export const duckDBProjectionRecoveryFlow: FlowStep[] = [
     from: "System",
     to: "DuckDBExporter",
     action: "restartAfterCommitGap",
-    when: "DuckDB committed but Core Data acknowledgement did not",
+    when: "DuckDB committed but SQLite acknowledgement did not",
   },
   {
     from: "DuckDBExporter",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "reclaimExpiredBatch",
     data: ["batchID", "sourceVersions"],
   },
@@ -317,7 +319,7 @@ export const duckDBProjectionRecoveryFlow: FlowStep[] = [
   },
   {
     from: "DuckDBExporter",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "acknowledgeRecoveredExport",
   },
 ];
@@ -389,14 +391,14 @@ export const parquetArchiveFlow: FlowStep[] = [
 /** Explicit on-demand body or attachment retrieval. */
 export const onDemandContentFlow: FlowStep[] = [
   {
-    from: "AppOrCLI",
+    from: "FrontendBackend",
     to: "FetchEmailClient",
     action: "start",
     data: ["messageIdentity", "selection", "transform", "retention", "maximumBytes"],
   },
   {
     from: "FetchEmailClient",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "persistFetchOperation",
     data: ["fetchID", "state=pending"],
   },
@@ -419,12 +421,12 @@ export const onDemandContentFlow: FlowStep[] = [
   },
   {
     from: "FetchEmailClient",
-    to: "CoreDataStore",
+    to: "SQLiteStore",
     action: "persistContentLeaseAndResult",
     data: ["leaseID", "ownerSessionID", "expiresAt", "artifacts", "state=completed"],
   },
   {
-    from: "AppOrCLI",
+    from: "FrontendBackend",
     to: "FetchEmailClient",
     action: "release",
     data: ["leaseID"],
@@ -446,3 +448,17 @@ export const libraryProcessingFlows = {
   parquetArchive: parquetArchiveFlow,
   onDemandContent: onDemandContentFlow,
 };
+
+/** Authentication state is ephemeral and explicitly supplied by the host. */
+export const authenticationFlow: FlowStep[] = [
+  { from: "FrontendBackend", to: "Session", action: "auth.set",
+    data: ["accountID", "exactlyOneMechanism", "username", "passwordOrAccessToken"],
+    notes: "No credential material is persisted or echoed. The host owns OAuth refresh." },
+  { from: "Session", to: "IMAPClient", action: "replaceAuthenticationGeneration",
+    notes: "Close old connections; selected mechanism requires verified TLS and server support." },
+  { from: "IMAPClient", to: "Session", action: "authenticationRequired",
+    when: "credentials are absent invalid or expired",
+    notes: "Block network work until new auth.set parameters and explicit resume." },
+  { from: "FrontendBackend", to: "Session", action: "close",
+    notes: "Reject new calls drain workers clear secrets close stores release ownership invalidate handle." },
+];

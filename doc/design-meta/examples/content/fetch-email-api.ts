@@ -2,8 +2,8 @@
  * Language-neutral design reference for SeleneTide on-demand email fetching.
  *
  * TypeScript keeps the contract concise. The production API will use
- * equivalent Swift Sendable values, async functions, AsyncSequence events,
- * file URLs, and cooperative cancellation.
+ * owned Rust snapshots and session workers; host adapters map operation IDs
+ * and event polling to async operations and cooperative cancellation.
  */
 
 import type {
@@ -162,7 +162,7 @@ export interface CleanupExpiredOptions {
 export interface FetchEmailClient {
   /**
    * Starts a fetch and returns once its durable operation record exists in the
-   * offline Core Data workflow store.
+   * offline SQLite workflow store.
    */
   start(request: FetchEmailRequest): Promise<FetchSnapshot>;
 

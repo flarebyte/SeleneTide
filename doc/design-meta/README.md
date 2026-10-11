@@ -4,7 +4,8 @@
 [executive overview](../design/overview.md) and the
 [full specification](../design/selenetide-specs.md). The full report assembles
 every artifact in `examples/` and covers
-requirements, storage authority, period workflows, IMAP metadata, Swift
+requirements, stateful Rust/C ABI sessions, authentication, SQLite storage authority,
+period workflows, IMAP metadata, Rust
 transformers, DuckDB export and Parquet archival, constrained queries,
 on-demand content, and planned test coverage.
 
@@ -19,23 +20,27 @@ The examples are grouped under `requirements/`, `architecture/`, `sync/`,
 `metadata/`, `processing/`, `storage/`, `query/`, `content/`, and `testing/`.
 [`consistency-review.md`](consistency-review.md) records the file-by-file review,
 resolved conflicts, and remaining implementation choices. The workflow field
-table is now `sync/coredata_workflow_fields.csv`, reflecting the selected Core
-Data persistence architecture.
+tables are `sync/sqlite_workflow_fields.csv` and
+`processing/sqlite_email_pipeline_fields.csv`. They define logical fields and
+SQLite mappings, constraints, and relationships rather than managed objects.
 
 [`testing/test_catalog.csv`](examples/testing/test_catalog.csv) records planned
-coarse-grained suites: 20 unit and 26 integration. Columns identify each suite's
+coarse-grained suites: 21 unit and 27 integration. Columns identify each suite's
 stable ID, test level, area, title, `desc`, and semicolon-separated specification
 note IDs. A row groups related assertions; it is not an implementation or a test
 result. The full report's test-plan section describes fixtures, failure injection,
 and how unresolved policies or optional capabilities affect the expectations.
 
-Edit the original CSV, TypeScript, Swift, JSON, and EML artifacts. CSV notes render
+Edit the original CSV, TypeScript, Rust, C header, JSON, and EML artifacts. CSV notes render
 all columns as Markdown tables; TypeScript and JSON notes render as code blocks.
-The TypeScript contracts describe the intended Swift API rather than a TypeScript
-implementation. Every example section links back to its original source.
+The TypeScript contracts describe JSON payloads and host adapters over the Rust
+session, rather than a TypeScript implementation. Promise and AsyncIterable
+conveniences map to operation IDs and event polling at the C ABI. Rust transformer
+registration stays internal; foreign transformer callbacks are outside v1.
+Every example section links back to its original source.
 
-The installed flyb renderer does not support `.swift` or `.eml` file extensions.
-`render-inputs/` contains three relative `.txt` symlinks to the original Swift and
+The installed flyb renderer supports `.rs` but not `.h` or `.eml` extensions.
+`render-inputs/` contains two relative `.txt` symlinks to the original C header and
 EML files. These notes render their full contents as text code blocks. The links
 read the original files on each generation, so there are no copied excerpts to
 refresh. Preserve the symlinks when checking out or copying the repository.

@@ -3,8 +3,10 @@ Pulling messages into place with the quiet inevitability of the moon moving the 
 
 ![Selene Tide](/SeleneTideHero.jpg)
 
-SeleneTide is a Swift library design for local IMAP metadata synchronization,
-durable email processing, and DuckDB/Parquet analytics on macOS and iOS.
+SeleneTide is a portable Rust library design for local IMAP metadata synchronization,
+durable email processing, and DuckDB/Parquet analytics. SQLite owns operational
+state. A frontend backend keeps a session through a C ABI with JSON payloads;
+credentials are caller-supplied and held only in memory. CLI features are deferred.
 
 Choose a reading path:
 
@@ -14,7 +16,7 @@ Choose a reading path:
 - **Plan verification:** the [test catalogue](doc/design-meta/examples/testing/test_catalog.csv) lists coarse-grained unit and integration suites to implement, with titles, descriptions, and specification references.
 
 Both generated reports share [the flyb configuration](doc/design-meta/app.cue).
-The full specification includes all 24 artifacts in
+The full specification includes all 27 artifacts in
 [`doc/design-meta/examples`](doc/design-meta/examples).
 
 With `flyb` installed, validate and regenerate both reports from the repository root:
