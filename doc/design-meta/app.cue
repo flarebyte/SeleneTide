@@ -46,6 +46,10 @@ reports: [{
 			title: "05 Session and Interop Rules"
 			description: "Lifecycle, concurrency, authentication, ABI, and SQL mappings. Source: [session_rules.csv](../design-meta/examples/api/session_rules.csv)."
 			notes: ["selenetide.api.rules"]
+		}, {
+			title: "06 Concept Registry and Selective Retrieval"
+			description: "Canonical concepts shared across CSV rules, schemas, requirements, and tests. Source: [concepts.csv](../design-meta/examples/concepts.csv). See the [retrieval convention](../design-meta/README.md#selective-csv-retrieval) for rg commands; concept and optional tags columns render alongside existing fields."
+			notes: ["selenetide.spec.concepts"]
 		}]
 	}, {
 		title:       "02 Product Requirements"
@@ -264,6 +268,13 @@ One application-local SQLite store isolates operational rows by account ID. Each
 }]
 
 notes: [
+	{
+		name: "selenetide.spec.concepts"
+		title: "Canonical Concept Registry"
+		filepath: "examples/concepts.csv"
+		arguments: ["format-csv=table"]
+		labels: ["csv", "example"]
+	},
 	{
 		name: "selenetide.api.c"
 		title: "C ABI Contract"

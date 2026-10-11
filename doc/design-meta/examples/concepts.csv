@@ -1,0 +1,42 @@
+id,description,parent
+account,Account configuration and isolation.,
+account.configuration,Non-secret account settings and account-scoped resources.,account
+content,Explicit on-demand message content.,
+content.fetch,Raw message or MIME-part selection fetching and content transformation.,content
+library,Portable Rust library delivery.,
+library.portability,Cross-platform build targets embedded engines and packaging.,library
+metadata,Metadata captured or derived without downloading message bodies.,
+metadata.derived,Normalized statistics classifications and signals derived from metadata.,metadata
+metadata.headers,IMAP flags envelope headers routing threading and message attributes.,metadata
+metadata.identity,Durable message keys canonical dates partitions and source revisions.,metadata
+metadata.mime,MIME structure parts attachments and content descriptors.,metadata
+metadata.provider,Provider-specific identifiers labels and correlation.,metadata
+processing,Versioned per-email transformations.,
+processing.pipeline,Processing graphs step dependencies and official completion outcomes.,processing
+processing.results,Durable step inputs outputs status and result encoding.,processing
+processing.reuse,Compatibility checks and verified reuse of completed results.,processing
+processing.transformers,Typed transformer contracts registry resolution and versions.,processing
+query,Constrained analytics and library exports.,
+query.execution,Parameterized SQL logical datasets query execution and CSV/JSON export.,query
+query.syntax,JSON query requests expression grammar and syntax errors.,query
+query.validation,Allow-listed identifiers bindings types aggregates and resource limits.,query
+session,Stateful backend session and foreign interface.,
+session.abi,C ABI and optional bindings buffer ownership JSON routing and operation handles.,session
+session.authentication,Caller-supplied credentials mechanism selection and authenticated connections.,session
+session.lifecycle,Session ownership initialization concurrency and shutdown.,session
+storage,Persistent operational and analytical storage.,
+storage.archive,Verified Parquet snapshots publication manifests and historical queries.,storage
+storage.artifacts,Managed intermediate files and disposable content retention.,storage
+storage.corrections,Changes tombstones and compaction affecting archived datasets.,storage
+storage.projection,SQLite-to-DuckDB projection claims revision fencing and acknowledgements.,storage
+storage.schema,Versioned storage types encodings and compatible schema evolution.,storage
+storage.sqlite,Operational SQLite transactions connections constraints and migrations.,storage
+sync,IMAP metadata synchronization.,
+sync.checkpoints,Durable mailbox generations cursors and period coverage.,sync
+sync.discovery,UID discovery metadata fetching and incremental reconciliation.,sync
+workflow,Shared durable orchestration across subsystems.,
+workflow.leases,Claim ownership expiry renewal and fencing of stale workers.,workflow
+workflow.progress,Status snapshots ordered progress diagnostics and audit trails.,workflow
+workflow.recovery,Restart reconciliation cancellation and idempotent resumption.,workflow
+workflow.retry,Failure classification retry attempts deadlines and backoff.,workflow
+workflow.scheduling,Plans tasks dependency gates bounded workers and completion.,workflow

@@ -16,7 +16,7 @@ Choose a reading path:
 - **Plan verification:** the [test catalogue](doc/design-meta/examples/testing/test_catalog.csv) lists coarse-grained unit and integration suites to implement, with titles, descriptions, and specification references.
 
 Both generated reports share [the flyb configuration](doc/design-meta/app.cue).
-The full specification includes all 27 artifacts in
+The full specification includes all 28 artifacts in
 [`doc/design-meta/examples`](doc/design-meta/examples).
 
 With `flyb` installed, validate and regenerate both reports from the repository root:
@@ -27,3 +27,5 @@ flyb generate markdown --config doc/design-meta
 ```
 
 See the [design source workflow](doc/design-meta/README.md) for editing and rendering details.
+For selective retrieval, start with the [concept registry](doc/design-meta/examples/concepts.csv)
+and the [CSV search convention](doc/design-meta/README.md#selective-csv-retrieval).

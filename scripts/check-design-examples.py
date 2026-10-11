@@ -2,6 +2,7 @@
 """Check design-source references and generated coverage; not a query DSL engine."""
 
 import csv
+import argparse
 import json
 from pathlib import Path
 import re
@@ -27,12 +28,53 @@ def unique_json(pairs):
 
 def read_table(path):
     with path.open(encoding="utf-8", newline="") as stream:
-        rows = list(csv.reader(stream))
-    require(rows and len(set(rows[0])) == len(rows[0]), f"Invalid header: {path}")
+        reader = csv.reader(stream, strict=True)
+        rows = []
+        previous_line = 0
+        try:
+            for row in reader:
+                require(reader.line_num == previous_line + 1,
+                        f"Multiline CSV record: {path}:{previous_line + 1}")
+                previous_line = reader.line_num
+                rows.append(row)
+        except csv.Error as error:
+            raise ValueError(f"Invalid CSV: {path}:{reader.line_num}: {error}") from error
+    require(rows and rows[0] and all(cell.strip() == cell and cell for cell in rows[0])
+            and len(set(rows[0])) == len(rows[0]), f"Invalid header: {path}")
     require(not rows[0][0].startswith("\ufeff"), f"Unexpected BOM: {path}")
     require(all(len(row) == len(rows[0]) for row in rows), f"Invalid row width: {path}")
+    require(all(row[0] and row[0].strip() == row[0] for row in rows[1:]), f"Invalid ID: {path}")
     require(len({row[0] for row in rows[1:]}) == len(rows) - 1, f"Duplicate IDs: {path}")
     return [dict(zip(rows[0], row)) for row in rows[1:]]
+
+
+def check_concepts(tables):
+    require("concepts.csv" in tables and tables["concepts.csv"], "Missing/empty concept registry")
+    registry = tables["concepts.csv"]
+    require(all(set(row) == {"id", "description", "parent"} for row in registry),
+            "Unexpected concept registry columns")
+    identifiers = [row["id"] for row in registry]
+    require(len(set(identifiers)) == len(identifiers), "Duplicate concept IDs")
+    concepts = set(identifiers)
+    for row in registry:
+        identifier = row["id"]
+        require(re.fullmatch(r"[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)*", identifier),
+                f"Invalid concept ID: {identifier}")
+        require(row["description"].strip(), f"Empty concept description: {identifier}")
+        parent = row["parent"]
+        require(not parent or parent in concepts, f"Unknown concept parent: {identifier}: {parent}")
+        # Immediate prefix parents establish a tree and prohibit cycles/self-parenting.
+        require(parent == identifier.rpartition(".")[0], f"Invalid concept hierarchy: {identifier}")
+    for name, rows in tables.items():
+        for row in rows:
+            if "concept" in row:
+                require(row["concept"] in concepts, f"Unknown/empty concept in {name}: {row['concept']}")
+            if "tags" in row:
+                tags = row["tags"].split(",") if row["tags"] else []
+                require(len(tags) == len(set(tags)) and all(
+                    re.fullmatch(r"[a-z][a-z0-9-]*", tag) for tag in tags),
+                    f"Invalid/duplicate tags in {name}: {row['tags']}")
+    return len(concepts)
 
 
 def escape_cell(value):
@@ -65,10 +107,15 @@ def check_links(generated):
             require(anchor in heading_anchors(target.read_text()), f"Broken section link: {link}")
 
 
-def main():
+def main(csv_only=False):
     paths = sorted(path for path in (META / "examples").rglob("*")
                    if path.is_file() and not path.name.startswith("."))
     tables = {path.name: read_table(path) for path in paths if path.suffix == ".csv"}
+    concept_count = check_concepts(tables)
+    if csv_only:
+        print(f"Checked {len(tables)} CSV files and {concept_count} registered concepts, "
+              "references, IDs, tags, and single-line record integrity.")
+        return
     model = json.loads(subprocess.check_output(
         ["cue", "export", "./doc/design-meta", "--out", "json"], cwd=ROOT, text=True))
     reports = {Path(report["filepath"]).name: report for report in model["reports"]}
@@ -120,13 +167,13 @@ def main():
     test_catalogue = tables["test_catalog.csv"]
     require(test_catalogue, "Test catalogue is empty")
     require(set(test_catalogue[0]) == {
-        "test_id", "test_level", "area", "title", "desc", "related_note_ids"
+        "test_id", "test_level", "area", "title", "desc", "related_note_ids", "concept", "tags"
     }, "Unexpected test catalogue columns")
     require({row["test_level"] for row in test_catalogue} == {"unit", "integration"},
             "Test catalogue must contain unit and integration suites only")
     spec_notes = {note["name"] for note in model["notes"]} - {"selenetide.testing.catalog"}
     for row in test_catalogue:
-        require(all(value.strip() for value in row.values()),
+        require(all(value.strip() for key, value in row.items() if key != "tags"),
                 f"Empty test catalogue field: {row['test_id']}")
         require(row["test_id"].startswith(row["test_level"] + "."),
                 f"Test ID disagrees with level: {row['test_id']}")
@@ -260,7 +307,11 @@ def main():
     print(f"Checked {len(paths)} examples, {sum(map(len, tables.values()))} CSV rows, "
           f"{len(examples)} query requests, entity inverses, stage gates, MIME, and complete generated coverage.")
     print(f"Checked both reports and their section links; executive overview: {overview_words} words.")
+    print(f"Checked {concept_count} registered concepts, references, tags, and single-line CSV integrity.")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--csv-only", action="store_true",
+                        help="Validate CSV sources without CUE or generated Markdown")
+    main(csv_only=parser.parse_args().csv_only)

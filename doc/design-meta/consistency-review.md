@@ -41,13 +41,17 @@ no production library or CLI in this repository.
 
 ## Source coverage
 
-All 27 example artifacts are registered in the full report. New `api/` sources
+All 28 example artifacts are registered in the full report. New `api/` sources
 specify session payloads, authentication alternatives, the C header, and lifecycle
 rules. Both persistence tables use SQLite names and explicit storage mappings.
 Rust sketches replace the transformer and exporter sketches. Requirements, use
 cases, processing flows, recovery rules, and the planned test catalogue follow
 the same architecture. The catalogue contains 21 unit and 27 integration suites;
 these are planned tests, not implemented test results.
+The canonical `concepts.csv` registry links 14 broad CSVs through shared concepts;
+optional test tags provide cross-cutting filters. Original cells and relationships
+are preserved. The query catalogue and workflow-stage table retain their existing
+schemas. See the [selective retrieval convention](README.md#selective-csv-retrieval).
 
 ## Remaining implementation choices
 
@@ -70,6 +74,8 @@ these are planned tests, not implemented test results.
 ## Repeatable checks
 
 ```sh
+python3 scripts/check-design-examples.py --csv-only
+python3 scripts/test_design_csv.py
 flyb validate --config doc/design-meta
 flyb lint names --config doc/design-meta
 flyb lint orphans --config doc/design-meta --subject-label example
@@ -81,6 +87,8 @@ clang -x c -std=c11 -Wall -Wextra -Werror -fsyntax-only doc/design-meta/examples
 The structural checker validates source coverage, CSV widths and IDs, feature
 references, planned-test references, entity inverses, stage dependencies, query
 columns and examples, the MIME fixture, generated links, and the overview budget.
+It also checks CSV integrity, single-line records, registered concept references,
+unique concept IDs, hierarchy, and optional tags.
 It does not execute SQLite, IMAP, JSON routing, or the C ABI. Rust sketches should
 be compiled with edition 2021 or later when a Rust toolchain is available; host
 adapter sketches should be checked with a strict ES2022 TypeScript compiler.
